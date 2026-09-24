@@ -8289,6 +8289,66 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
             </div>
           </section>
 
+          <section class="panel p-3 mb-3" id="mitigationNowPanel">
+            <div class="d-flex justify-content-between align-items-center gap-2 mb-2">
+              <div>
+                <div class="panel-title">Agora / Estado operacional</div>
+                <div id="mitigationNowSummary" class="metric-readout">Carregando mitigações ativas...</div>
+              </div>
+              <div class="subtle">Atualizado pelo orquestrador (5s) e pelo checker de conectores (30s).</div>
+            </div>
+            <div id="mitigationNowCards" class="d-grid gap-2">
+              <div class="subtle">Carregando mitigações ativas...</div>
+            </div>
+          </section>
+
+          <section class="panel p-3 mb-3" id="mitigationRecentEventsPanel">
+            <div class="panel-title mb-1">Eventos recentes</div>
+            <div class="subtle mb-2">Últimas decisões do orquestrador: mitigados, já mitigados/correlacionados, bloqueados pela policy, falhas e expirados/retirados (execuções automáticas).</div>
+            <div class="database-metrics-grid mb-3">
+              <div class="metric-card"><div class="metric-label">Mitigados (ativos)</div><div id="mitigationRecentMitigated" class="metric-value">0</div></div>
+              <div class="metric-card"><div class="metric-label">Já mitigados / correlacionados</div><div id="mitigationRecentCorrelated" class="metric-value">0</div></div>
+              <div class="metric-card"><div class="metric-label">Bloqueados pela policy</div><div id="mitigationRecentBlocked" class="metric-value">0</div></div>
+              <div class="metric-card"><div class="metric-label">Falhas</div><div id="mitigationRecentFailed" class="metric-value">0</div></div>
+              <div class="metric-card"><div class="metric-label">Expirados / retirados</div><div id="mitigationRecentEnded" class="metric-value">0</div></div>
+            </div>
+            <div class="panel-title mb-2">Execuções automáticas</div>
+            <div class="subtle mb-2">Fonte de verdade do orquestrador: avaliação, aplicação, TTL, retirada e falhas.</div>
+            <div class="table-wrap mb-3">
+              <table class="table table-sm table-hover align-middle mb-0">
+                <thead><tr><th>ID</th><th>Anomalia</th><th>Vetor / perfil</th><th>Status</th><th>Conector</th><th>Regra</th><th>Aplicado</th><th>Expira</th><th>Resultado / erro</th></tr></thead>
+                <tbody id="automaticMitigationExecutionsTable"><tr><td colspan="9" class="text-muted">Nenhuma execução automática registrada.</td></tr></tbody>
+              </table>
+            </div>
+            <div class="panel-title mb-2">Sugestões aguardando aprovação</div>
+            <div class="table-wrap mb-3"><table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>ID</th><th>Anomalia</th><th>Vetor</th><th>Conector</th><th>Decisão</th><th>Ação</th><th>Alvo</th><th>Comando</th><th>Ações</th></tr></thead><tbody id="bgpPendingSuggestionsTable"></tbody></table></div>
+            <div class="panel-title mb-2">Em processamento / sem confirmação</div>
+            <div class="table-wrap mb-3"><table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>ID</th><th>Status</th><th>Conector</th><th>Perfil</th><th>Ação</th><th>Alvo</th><th>Confirmação</th><th>Comandos</th><th>Ações</th></tr></thead><tbody id="bgpInFlightAnnouncementsTable"></tbody></table></div>
+            <div class="panel-title mb-2">FlowSpec ativos confirmados pela aplicação</div>
+            <div class="table-wrap mb-3"><table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>ID</th><th>Status</th><th>Conector</th><th>Perfil</th><th>Decisão</th><th>Ação</th><th>Alvo</th><th>Retirada automática</th><th>Comandos</th><th>Ações</th></tr></thead><tbody id="bgpActiveAnnouncementsTable"></tbody></table></div>
+            <div class="panel-title mb-2">Falhas</div>
+            <div class="table-wrap mb-3"><table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>ID</th><th>Criado</th><th>Status</th><th>Conector</th><th>Perfil</th><th>Decisão</th><th>Ação</th><th>Alvo</th><th>Erro</th><th>Comando</th><th>Ações</th></tr></thead><tbody id="bgpFailedAnnouncementsTable"></tbody></table></div>
+            <div class="panel-title mb-2">Histórico</div>
+            <div class="table-wrap"><table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>ID</th><th>Criado</th><th>Retirado</th><th>Status</th><th>Conector</th><th>Perfil</th><th>Decisão</th><th>Ação</th><th>Erro</th><th>Comando</th></tr></thead><tbody id="bgpHistoryAnnouncementsTable"></tbody></table></div>
+          </section>
+
+          <section class="panel p-3 mt-3" id="mitigationAutomationHealthPanel">
+            <div class="panel-title mb-2">Saúde da automação</div>
+            <div class="database-metrics-grid mb-2">
+              <div class="metric-card"><div class="metric-label">BGP pronto?</div><div id="mitigationHealthBgp" class="metric-value">-</div><div id="mitigationHealthBgpNote" class="subtle">-</div></div>
+              <div class="metric-card"><div class="metric-label">FlowSpec disponível?</div><div id="mitigationHealthFlowspec" class="metric-value">-</div><div id="mitigationHealthFlowspecNote" class="subtle">-</div></div>
+              <div class="metric-card"><div class="metric-label">Orquestrador</div><div id="mitigationHealthOrchestrator" class="metric-value">-</div><div id="mitigationHealthOrchestratorNote" class="subtle">-</div></div>
+              <div class="metric-card"><div class="metric-label">Perfis (válidos / inválidos / unsafe)</div><div id="mitigationHealthProfiles" class="metric-value">-</div><div id="mitigationHealthProfilesNote" class="subtle">-</div></div>
+            </div>
+            <div class="panel-title mb-2">Últimas falhas</div>
+            <div id="mitigationHealthFailures" class="subtle">-</div>
+          </section>
+
+          <div class="mt-4 mb-1">
+            <h2 class="view-title mb-0" style="font-size:1.15rem;">Configuração</h2>
+            <div class="subtle">Perfis de resposta · Políticas de porta · Prefixos protegidos · IA · Controles manuais</div>
+          </div>
+
           <section class="panel p-3 mb-3">
             <div class="d-flex justify-content-between align-items-center gap-2 mb-2">
               <div>
@@ -8397,6 +8457,30 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
             <div class="table-wrap"><table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>CIDR</th><th>Nome</th><th>Motivo</th><th>Status</th><th>Ações</th></tr></thead><tbody id="bgpProtectedTable"></tbody></table></div>
           </section>
 
+          <section class="panel p-3 mt-3">
+            <div class="panel-title mb-2">Controles manuais (teste manual / laboratório)</div>
+            <div class="subtle mb-2">O TTL controla a retirada automática no GMJ-FLOW e não comprova anúncio ao peer. O estado abaixo informa se houve somente prévia, envio ao ExaBGP ou confirmação operacional local.</div>
+            <div class="flow-search-grid mb-2">
+              <div class="field"><label for="bgpDryConnector">Conector</label><select id="bgpDryConnector" class="form-select form-select-sm"></select></div>
+              <div class="field"><label for="bgpDryAction">Ação</label><select id="bgpDryAction" class="form-select form-select-sm"><option value="dry_run">dry-run only</option><option value="announce">announce</option><option value="withdraw">withdraw</option></select></div>
+              <div class="field"><label for="bgpDrySrcIp">Src IP/CIDR</label><input id="bgpDrySrcIp" class="form-control form-control-sm"></div>
+              <div class="field"><label for="bgpDryDstIp">Dst IP/CIDR</label><input id="bgpDryDstIp" class="form-control form-control-sm"></div>
+              <div class="field"><label for="bgpDryProtocol">Protocolo</label><input id="bgpDryProtocol" class="form-control form-control-sm" placeholder="udp"></div>
+              <div class="field"><label for="bgpDrySrcPort">Src port</label><input id="bgpDrySrcPort" type="number" min="1" max="65535" class="form-control form-control-sm"></div>
+              <div class="field"><label for="bgpDryDstPort">Dst port</label><input id="bgpDryDstPort" type="number" min="1" max="65535" class="form-control form-control-sm"></div>
+              <div class="field"><label for="bgpDryThenAction">Ação FlowSpec</label><select id="bgpDryThenAction" class="form-select form-select-sm"><option value="discard">Descartar</option><option value="rate_limit">Rate-limit</option><option value="accept">Aceitar</option></select></div>
+              <div id="bgpDryRateLimitField" class="field"><label for="bgpDryRateLimit">Limite</label><input id="bgpDryRateLimit" class="form-control form-control-sm" placeholder="ex: 100M, 500K, 1G"><div id="bgpDryRatePreview" class="subtle"></div></div>
+              <div class="field"><label for="bgpDryDuration">TTL interno (s)</label><input id="bgpDryDuration" type="number" min="60" class="form-control form-control-sm" value="1800"></div>
+              <div class="field"><label for="bgpDryConfirm">Confirmação</label><input id="bgpDryConfirm" class="form-control form-control-sm" placeholder="ANUNCIAR"></div>
+            </div>
+            <div class="toolbar mb-2">
+              <button id="previewBgpDryRunButton" type="button" class="btn btn-sm btn-outline-secondary"><i data-lucide="eye"></i><span>Gerar preview</span></button>
+              <button id="runBgpDryRunButton" type="button" class="btn btn-sm btn-success"><i data-lucide="radio-tower"></i><span>Anunciar agora</span></button>
+              <button id="withdrawBgpDryRunButton" type="button" class="btn btn-sm btn-outline-danger"><i data-lucide="undo-2"></i><span>Retirar agora</span></button>
+            </div>
+            <pre id="bgpDryRunOutput" class="bg-light border rounded p-2 mb-0" style="white-space:pre-wrap; min-height:90px;"></pre>
+          </section>
+
           <section class="panel p-3 mt-3" id="rtbhPanel">
             <div class="d-flex justify-content-between align-items-center gap-2 mb-2">
               <div>
@@ -8455,50 +8539,9 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
             </div>
           </section>
 
-          <section class="panel p-3 mt-3">
-            <div class="panel-title mb-2">Teste manual / laboratorio</div>
-            <div class="subtle mb-2">O TTL controla a retirada automática no GMJ-FLOW e não comprova anúncio ao peer. O estado abaixo informa se houve somente prévia, envio ao ExaBGP ou confirmação operacional local.</div>
-            <div class="flow-search-grid mb-2">
-              <div class="field"><label for="bgpDryConnector">Conector</label><select id="bgpDryConnector" class="form-select form-select-sm"></select></div>
-              <div class="field"><label for="bgpDryAction">Ação</label><select id="bgpDryAction" class="form-select form-select-sm"><option value="dry_run">dry-run only</option><option value="announce">announce</option><option value="withdraw">withdraw</option></select></div>
-              <div class="field"><label for="bgpDrySrcIp">Src IP/CIDR</label><input id="bgpDrySrcIp" class="form-control form-control-sm"></div>
-              <div class="field"><label for="bgpDryDstIp">Dst IP/CIDR</label><input id="bgpDryDstIp" class="form-control form-control-sm"></div>
-              <div class="field"><label for="bgpDryProtocol">Protocolo</label><input id="bgpDryProtocol" class="form-control form-control-sm" placeholder="udp"></div>
-              <div class="field"><label for="bgpDrySrcPort">Src port</label><input id="bgpDrySrcPort" type="number" min="1" max="65535" class="form-control form-control-sm"></div>
-              <div class="field"><label for="bgpDryDstPort">Dst port</label><input id="bgpDryDstPort" type="number" min="1" max="65535" class="form-control form-control-sm"></div>
-              <div class="field"><label for="bgpDryThenAction">Ação FlowSpec</label><select id="bgpDryThenAction" class="form-select form-select-sm"><option value="discard">Descartar</option><option value="rate_limit">Rate-limit</option><option value="accept">Aceitar</option></select></div>
-              <div id="bgpDryRateLimitField" class="field"><label for="bgpDryRateLimit">Limite</label><input id="bgpDryRateLimit" class="form-control form-control-sm" placeholder="ex: 100M, 500K, 1G"><div id="bgpDryRatePreview" class="subtle"></div></div>
-              <div class="field"><label for="bgpDryDuration">TTL interno (s)</label><input id="bgpDryDuration" type="number" min="60" class="form-control form-control-sm" value="1800"></div>
-              <div class="field"><label for="bgpDryConfirm">Confirmação</label><input id="bgpDryConfirm" class="form-control form-control-sm" placeholder="ANUNCIAR"></div>
-            </div>
-            <div class="toolbar mb-2">
-              <button id="previewBgpDryRunButton" type="button" class="btn btn-sm btn-outline-secondary"><i data-lucide="eye"></i><span>Gerar preview</span></button>
-              <button id="runBgpDryRunButton" type="button" class="btn btn-sm btn-success"><i data-lucide="radio-tower"></i><span>Anunciar agora</span></button>
-              <button id="withdrawBgpDryRunButton" type="button" class="btn btn-sm btn-outline-danger"><i data-lucide="undo-2"></i><span>Retirar agora</span></button>
-            </div>
-            <pre id="bgpDryRunOutput" class="bg-light border rounded p-2 mb-0" style="white-space:pre-wrap; min-height:90px;"></pre>
-          </section>
 
-          <section class="panel p-3 mt-3">
-            <div class="panel-title mb-1">Execuções automáticas</div>
-            <div class="subtle mb-2">Fonte de verdade do orquestrador: avaliação, aplicação, TTL, retirada e falhas.</div>
-            <div class="table-wrap mb-3">
-              <table class="table table-sm table-hover align-middle mb-0">
-                <thead><tr><th>ID</th><th>Anomalia</th><th>Vetor / perfil</th><th>Status</th><th>Conector</th><th>Regra</th><th>Aplicado</th><th>Expira</th><th>Resultado / erro</th></tr></thead>
-                <tbody id="automaticMitigationExecutionsTable"><tr><td colspan="9" class="text-muted">Nenhuma execução automática registrada.</td></tr></tbody>
-              </table>
-            </div>
-            <div class="panel-title mb-2">Sugestões aguardando aprovação</div>
-            <div class="table-wrap mb-3"><table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>ID</th><th>Anomalia</th><th>Vetor</th><th>Conector</th><th>Decisão</th><th>Ação</th><th>Alvo</th><th>Comando</th><th>Ações</th></tr></thead><tbody id="bgpPendingSuggestionsTable"></tbody></table></div>
-            <div class="panel-title mb-2">Em processamento / sem confirmação</div>
-            <div class="table-wrap mb-3"><table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>ID</th><th>Status</th><th>Conector</th><th>Perfil</th><th>Ação</th><th>Alvo</th><th>Confirmação</th><th>Comandos</th><th>Ações</th></tr></thead><tbody id="bgpInFlightAnnouncementsTable"></tbody></table></div>
-            <div class="panel-title mb-2">FlowSpec ativos confirmados pela aplicação</div>
-            <div class="table-wrap mb-3"><table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>ID</th><th>Status</th><th>Conector</th><th>Perfil</th><th>Decisão</th><th>Ação</th><th>Alvo</th><th>Retirada automática</th><th>Comandos</th><th>Ações</th></tr></thead><tbody id="bgpActiveAnnouncementsTable"></tbody></table></div>
-            <div class="panel-title mb-2">Falhas</div>
-            <div class="table-wrap mb-3"><table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>ID</th><th>Criado</th><th>Status</th><th>Conector</th><th>Perfil</th><th>Decisão</th><th>Ação</th><th>Alvo</th><th>Erro</th><th>Comando</th><th>Ações</th></tr></thead><tbody id="bgpFailedAnnouncementsTable"></tbody></table></div>
-            <div class="panel-title mb-2">Histórico</div>
-            <div class="table-wrap"><table class="table table-sm table-hover align-middle mb-0"><thead><tr><th>ID</th><th>Criado</th><th>Retirado</th><th>Status</th><th>Conector</th><th>Perfil</th><th>Decisão</th><th>Ação</th><th>Erro</th><th>Comando</th></tr></thead><tbody id="bgpHistoryAnnouncementsTable"></tbody></table></div>
-          </section>
+
+
         </section>
 
         <section id="view-cgnat" class="app-view">
@@ -9596,6 +9639,23 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
       </div>
       <div class="gmj-dialog-footer">
         <button type="button" class="btn btn-sm btn-outline-secondary" data-close-modal="bgpMitigationModal">Fechar</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="bgpAnnouncementDetailModal" class="gmj-modal" role="dialog" aria-modal="true" aria-labelledby="bgpAnnouncementDetailTitle">
+    <div class="gmj-dialog">
+      <div class="gmj-dialog-header">
+        <h2 id="bgpAnnouncementDetailTitle" class="view-title">Detalhes da mitigação</h2>
+        <button type="button" class="icon-button" data-close-modal="bgpAnnouncementDetailModal" aria-label="Fechar">
+          <i data-lucide="x"></i>
+        </button>
+      </div>
+      <div class="gmj-dialog-body">
+        <div id="bgpAnnouncementDetailBody" class="d-grid gap-2">-</div>
+      </div>
+      <div class="gmj-dialog-footer">
+        <button type="button" class="btn btn-sm btn-outline-secondary" data-close-modal="bgpAnnouncementDetailModal">Fechar</button>
       </div>
     </div>
   </div>
@@ -11578,6 +11638,8 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
     let bgpProtectedPrefixes = [];
     let bgpAnnouncements = [];
     let automaticMitigationExecutions = [];
+    let automaticMitigationExecutionSummary = {};
+    let mitigationAutomationHealthPayload = null;
     let bgpPortPolicies = [];
     let bgpConnectorStatuses = [];
     let bgpStatusesRefreshInFlight = null;
@@ -16919,6 +16981,178 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       `).join('') || '<tr><td colspan="10" class="text-muted">Nenhum registro no histórico.</td></tr>';
     }
 
+    function formatRemainingWindow(expiresAt) {
+      const target = new Date(expiresAt || '');
+      if (Number.isNaN(target.getTime())) return { text: '-', cls: '' };
+      const diffMs = target.getTime() - Date.now();
+      if (diffMs <= 0) return { text: 'TTL vencido (aguardando retirada)', cls: 'danger' };
+      const minutes = Math.floor(diffMs / 60000);
+      const hours = Math.floor(minutes / 60);
+      const label = hours >= 1 ? `${hours}h ${String(minutes % 60).padStart(2, '0')}min restantes` : `${Math.max(1, minutes)} min restantes`;
+      return { text: label, cls: minutes <= 10 ? 'warn' : 'ok' };
+    }
+
+    function mitigationConnectorConfirmation(item = {}) {
+      const connector = (bgpConnectors || []).find(row => Number(row.id) === Number(item.connector_id)) || null;
+      const snapshot = connector && connector.status_snapshot && typeof connector.status_snapshot === 'object' ? connector.status_snapshot : {};
+      const bgpBlock = snapshot.bgp && typeof snapshot.bgp === 'object' ? snapshot.bgp : {};
+      const readinessBlock = snapshot.readiness && typeof snapshot.readiness === 'object' ? snapshot.readiness : {};
+      const bgpState = String(bgpBlock.state || connector?.bgp_state || '').toLowerCase();
+      const peerState = String(item.peer_state || '').toLowerCase();
+      if (peerState === 'established' || bgpState === 'established') return { label: 'Confirmado: BGP estabelecido', cls: 'ok' };
+      if (String(readinessBlock.state || '').toLowerCase() === 'ready') return { label: 'Conector pronto (readiness)', cls: 'ok' };
+      if (peerState) return { label: `Peer ${peerState}`, cls: 'warn' };
+      return { label: 'Sem confirmação do conector', cls: 'warn' };
+    }
+
+    function renderMitigationNow() {
+      const container = document.getElementById('mitigationNowCards');
+      if (!container) return;
+      const items = (bgpAnnouncements || []).filter(item => bgpAnnouncementIsOperationalActive(item));
+      const inFlight = (bgpAnnouncements || []).filter(item => bgpAnnouncementIsInFlight(item) && !bgpAnnouncementIsOperationalActive(item));
+      setText('mitigationNowSummary', items.length
+        ? `${items.length} mitigação(ões) ativa(s) · ${inFlight.length} em processamento`
+        : `Nenhuma mitigação ativa agora · ${inFlight.length} em processamento`);
+      if (!items.length) {
+        container.innerHTML = '<div class="subtle">Nenhuma mitigação ativa. Novas ações automáticas aparecem aqui assim que forem anunciadas.</div>';
+        return;
+      }
+      container.innerHTML = items.map(item => {
+        const remaining = formatRemainingWindow(item.expires_at);
+        const confirmation = mitigationConnectorConfirmation(item);
+        const info = bgpAnnouncementStatusInfo(item);
+        return `
+        <div class="border rounded p-3">
+          <div class="d-flex justify-content-between align-items-start gap-2 flex-wrap">
+            <div>
+              <div class="fw-semibold">Alvo <code>${escapeHtml(item.target_prefix || item.src_prefix || item.dst_prefix || '-')}</code></div>
+              <div class="subtle">Ataque/vetor: ${escapeHtml(item.attack_vector_name || item.raw_payload?.attack_vector_name || '-')}${item.anomaly_id ? ` · anomalia #${escapeHtml(item.anomaly_id)}` : ''}</div>
+            </div>
+            <div class="d-flex gap-2 flex-wrap">
+              <span class="badge-soft ok">FlowSpec ativo</span>
+              <span class="badge-soft ${confirmation.cls}">${escapeHtml(confirmation.label)}</span>
+              <span class="badge-soft ${remaining.cls}">${escapeHtml(remaining.text)}</span>
+            </div>
+          </div>
+          <div class="subtle mt-2">
+            Ação aplicada: <strong>${escapeHtml(bgpActionLabel(item))}</strong> · Conector: ${mitigationConnectorLink(item)} ·
+            Início: ${escapeHtml(formatDateTime(item.advertised_at || item.announced_at || item.created_at))} ·
+            Expira: ${escapeHtml(formatDateTime(item.expires_at))}
+          </div>
+          <div class="subtle">${escapeHtml(info.confirmation || '')}</div>
+          <div class="toolbar mt-2">
+            <button type="button" class="btn btn-sm btn-outline-secondary mitigation-now-detail" data-id="${item.id}"><i data-lucide="list"></i><span>Detalhes</span></button>
+            ${hasPermission('bgp.apply') ? `<button type="button" class="btn btn-sm btn-outline-danger bgp-ann-withdraw" data-id="${item.id}"><i data-lucide="undo-2"></i><span>Retirar</span></button>` : '<span class="subtle">Somente leitura</span>'}
+          </div>
+        </div>`;
+      }).join('');
+      createIcons();
+    }
+
+    function mitigationProfileStatus(item = {}) {
+      return String(item.validation_status || item.profile_status || '').toLowerCase();
+    }
+
+    function renderMitigationRecentEvents() {
+      const summary = automaticMitigationExecutionSummary || {};
+      const executions = automaticMitigationExecutions || [];
+      const index = automaticMitigationActiveIndex();
+      const correlated = executions.filter(item => automaticMitigationDisplayState(item, index).alreadyMitigated).length;
+      const mitigated = Number(summary.active || 0) + Number(summary.withdraw_pending || 0);
+      const blocked = Number(summary.blocked || 0) + Number(summary.cancelled || 0);
+      const failed = Number(summary.failed || 0);
+      const ended = Number(summary.withdrawn || 0) + Number(summary.expired || 0);
+      setText('mitigationRecentMitigated', formatNumber(mitigated));
+      setText('mitigationRecentCorrelated', formatNumber(correlated));
+      setText('mitigationRecentBlocked', formatNumber(blocked));
+      setText('mitigationRecentFailed', formatNumber(failed));
+      setText('mitigationRecentEnded', formatNumber(ended));
+    }
+
+    function renderMitigationAutomationHealth(payload) {
+      if (payload) mitigationAutomationHealthPayload = payload;
+      const current = mitigationAutomationHealthPayload || null;
+      const connectors = bgpConnectors || [];
+      const bgpReady = connectors.filter(item => String(item.bgp_state || '').toLowerCase() === 'established').length;
+      const flowspecReady = connectors.filter(item => ['established', 'available'].includes(String(item.flowspec_state || '').toLowerCase())).length;
+      setText('mitigationHealthBgp', `${bgpReady}/${connectors.length}`);
+      setText('mitigationHealthBgpNote', connectors.length && bgpReady === connectors.length ? 'Sessão BGP confirmada em todos os conectores' : 'Revisar conectores com sessão não confirmada');
+      setText('mitigationHealthFlowspec', `${flowspecReady}/${connectors.length}`);
+      setText('mitigationHealthFlowspecNote', connectors.length && flowspecReady === connectors.length ? 'FlowSpec disponível em todos os conectores' : 'Revisar conectores sem FlowSpec confirmado');
+      const orchestrator = current?.orchestrator || {};
+      if (current) {
+        const alive = Boolean(orchestrator.worker_enabled) && Boolean(orchestrator.thread_alive);
+        setText('mitigationHealthOrchestrator', alive ? 'Ativo' : (orchestrator.worker_enabled ? 'Degradado' : 'Desativado'));
+        const parts = [];
+        if (orchestrator.interval_seconds) parts.push(`ciclo ${orchestrator.interval_seconds}s`);
+        const lastActivity = orchestrator.last_job_at || orchestrator.last_execution_at || '';
+        if (lastActivity) parts.push(`última atividade ${formatDateTime(lastActivity)}`);
+        setText('mitigationHealthOrchestratorNote', parts.join(' · ') || 'Sem atividade registrada');
+      } else {
+        setText('mitigationHealthOrchestrator', 'Indisponível');
+        setText('mitigationHealthOrchestratorNote', 'Não foi possível consultar o orquestrador');
+      }
+      const profiles = bgpProfiles || [];
+      const valid = profiles.filter(item => mitigationProfileStatus(item) === 'valid').length;
+      const invalid = profiles.filter(item => mitigationProfileStatus(item).startsWith('invalid')).length;
+      const unsafe = profiles.filter(item => {
+        const status = mitigationProfileStatus(item);
+        return status === 'unsafe' || status === 'deprecated' || item.is_deprecated || item.uses_source_port;
+      }).length;
+      setText('mitigationHealthProfiles', `${valid} / ${invalid} / ${unsafe}`);
+      setText('mitigationHealthProfilesNote', `${profiles.length} perfis cadastrados · ${profiles.filter(item => item.enabled).length} ativos`);
+      const seen = new Set();
+      const failures = [];
+      (current?.recent_failures || []).concat((automaticMitigationExecutions || [])
+        .filter(item => String(item.status || '').toLowerCase() === 'failed')
+        .map(item => ({ id: item.id, anomaly_id: item.anomaly_id, vector: item.vector, error: item.error_message || item.error_code || item.policy_reason, at: item.updated_at })))
+        .forEach(item => {
+          const key = `${item.id}|${item.error || ''}`;
+          if (seen.has(key) || failures.length >= 5) return;
+          seen.add(key);
+          failures.push(item);
+        });
+      const target = document.getElementById('mitigationHealthFailures');
+      if (target) {
+        target.innerHTML = failures.length
+          ? failures.map(item => `<div>#${escapeHtml(item.id)} · ${escapeHtml(item.vector || '-')} · anomalia #${escapeHtml(item.anomaly_id || '-')} · ${escapeHtml(item.error || '-')} <span class="subtle">(${escapeHtml(formatDateTime(item.at))})</span></div>`).join('')
+          : '<div class="subtle">Nenhuma falha recente de automação.</div>';
+      }
+    }
+
+    function openBgpAnnouncementDetail(announcementId) {
+      const item = (bgpAnnouncements || []).find(row => Number(row.id) === Number(announcementId));
+      const body = document.getElementById('bgpAnnouncementDetailBody');
+      if (!item || !body) return;
+      const info = bgpAnnouncementStatusInfo(item);
+      const remaining = formatRemainingWindow(item.expires_at);
+      const confirmation = mitigationConnectorConfirmation(item);
+      const execution = (automaticMitigationExecutions || []).find(row => Number(row.anomaly_id) === Number(item.anomaly_id)) || null;
+      const cell = (label, value) => `<div><span class="subtle">${escapeHtml(label)}</span><div>${value}</div></div>`;
+      body.innerHTML = `
+        <div class="d-grid" style="grid-template-columns:repeat(auto-fit,minmax(230px,1fr)); gap:10px;">
+          ${cell('Alvo', `<code>${escapeHtml(item.target_prefix || item.src_prefix || item.dst_prefix || '-')}</code>`)}
+          ${cell('Ataque / vetor', escapeHtml(item.attack_vector_name || item.raw_payload?.attack_vector_name || '-'))}
+          ${cell('Ação aplicada', escapeHtml(bgpActionLabel(item)))}
+          ${cell('Conector', mitigationConnectorLink(item))}
+          ${cell('Status', bgpAnnouncementStatusBadge(item))}
+          ${cell('Confirmação do canal', `<span class="badge-soft ${confirmation.cls}">${escapeHtml(confirmation.label)}</span>`)}
+          ${cell('Início (anúncio)', escapeHtml(formatDateTime(item.advertised_at || item.announced_at || item.created_at)))}
+          ${cell('Expira em', `${escapeHtml(formatDateTime(item.expires_at))} <span class="subtle">(${escapeHtml(remaining.text)})</span>`)}
+          ${cell('Anomalia', item.anomaly_id ? `#${escapeHtml(item.anomaly_id)}` : '-')}
+          ${cell('Origem', escapeHtml(item.source || '-'))}
+          ${cell('Decisão da policy', `${escapeHtml(mitigationDecisionLabel(item.policy_decision))}<div class="subtle">${escapeHtml((item.policy_reasons || []).join(' | '))}</div>`)}
+          ${cell('Execução automática', execution ? `#${escapeHtml(execution.id)} · ${escapeHtml(execution.status)}${execution.error_message ? ` · ${escapeHtml(execution.error_message)}` : ''}` : 'Sem execução automática correlata')}
+        </div>
+        <details><summary>Comando de anúncio</summary><pre class="mb-0">${escapeHtml(item.announce_command || item.rendered_command || '-')}</pre></details>
+        <details><summary>Comando de retirada</summary><pre class="mb-0">${escapeHtml(item.withdraw_command || '-')}</pre></details>
+        ${item.last_error ? `<div class="subtle">Último erro: ${escapeHtml(item.last_error)}</div>` : ''}
+        <div class="subtle">${escapeHtml(info.note || info.confirmation || '')}</div>
+      `;
+      openModal('bgpAnnouncementDetailModal');
+      createIcons();
+    }
+
     function renderBgpWorkspace() {
       renderBgpSelects();
       renderBgpPeerStatus();
@@ -16945,6 +17179,9 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       renderBgpPolicies();
       renderBgpAnnouncements();
       renderAutomaticMitigationExecutions();
+      renderMitigationNow();
+      renderMitigationRecentEvents();
+      renderMitigationAutomationHealth(mitigationAutomationHealthPayload);
       updateBgpDryRateLimitUi();
       createIcons();
     }
@@ -17112,14 +17349,15 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
 
     async function loadMitigationView() {
       setText('bgpStatus', 'Carregando Mitigação...');
-      const [connectors, profiles, protectedPrefixes, policies, announcements, summary, automaticExecutions] = await Promise.all([
+      const [connectors, profiles, protectedPrefixes, policies, announcements, summary, automaticExecutions, automationHealth] = await Promise.all([
         apiRequest('/api/bgp/connectors'),
         apiRequest('/api/bgp/response-profiles'),
         apiRequest('/api/bgp/protected-prefixes?include_disabled=true'),
         apiRequest('/api/bgp/port-policies?include_disabled=true'),
         apiRequest('/api/bgp/announcements?limit=200'),
         apiRequest('/api/bgp/summary'),
-        apiRequest('/api/mitigation/executions?limit=200')
+        apiRequest('/api/mitigation/executions?limit=200'),
+        apiRequest('/api/mitigation/automation/health').catch(() => null)
       ]);
       bgpConnectors = Array.isArray(connectors.items) ? connectors.items : [];
       bgpProfiles = bgpResponseProfilesFromPayload(profiles);
@@ -17127,6 +17365,8 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       bgpPortPolicies = Array.isArray(policies.items) ? policies.items : [];
       bgpAnnouncements = Array.isArray(announcements.items) ? announcements.items : [];
       automaticMitigationExecutions = Array.isArray(automaticExecutions.items) ? automaticExecutions.items : [];
+      automaticMitigationExecutionSummary = automaticExecutions.summary && typeof automaticExecutions.summary === 'object' ? automaticExecutions.summary : {};
+      mitigationAutomationHealthPayload = automationHealth && typeof automationHealth === 'object' ? automationHealth : null;
       renderOpsSummary(summary);
       renderMitigationWorkspace();
       await loadMitigationAiSummary().catch(error => setText('mitigationAiState', `Falha IA: ${error.message}`));
@@ -32761,6 +33001,16 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       if (approve) updateBgpAnnouncement(approve.dataset.id, 'approve').catch(error => setText('bgpStatus', `Falha ao aprovar: ${error.message}`));
       if (reject) updateBgpAnnouncement(reject.dataset.id, 'reject').catch(error => setText('bgpStatus', `Falha ao rejeitar: ${error.message}`));
     });
+    const mitigationNowContainer = document.getElementById('mitigationNowCards');
+    if (mitigationNowContainer) {
+      mitigationNowContainer.addEventListener('click', event => {
+        const target = event.target instanceof Element ? event.target : event.target.parentElement;
+        const detail = target?.closest('.mitigation-now-detail');
+        const withdraw = target?.closest('.bgp-ann-withdraw');
+        if (detail) openBgpAnnouncementDetail(Number(detail.dataset.id));
+        if (withdraw) updateBgpAnnouncement(withdraw.dataset.id, 'withdraw').catch(error => setText('bgpStatus', `Falha ao withdraw: ${error.message}`));
+      });
+    }
 
     document.getElementById('newSensorButton').addEventListener('click', newSensor);
     document.getElementById('saveSensorButton').addEventListener('click', () => saveSensor().catch(console.error));
