@@ -15720,7 +15720,7 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
         ? 'ok'
         : kind === 'down'
           ? 'down'
-          : kind === 'unknown' || kind === 'not_verified'
+          : kind === 'unknown' || kind === 'not_verified' || kind === 'warn'
             ? 'warn'
             : 'off';
       return `<span class="badge-soft ${css}">${escapeHtml(label)}</span>`;
@@ -15756,11 +15756,39 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
       return hasFlowspecProfile || connector?.role === 'flowspec_mitigation' || status.role === 'flowspec_mitigation' || truthyFlag(status.flowspec_enabled);
     }
 
+    function bgpExabgpBlock(status) {
+      return status?.exabgp && typeof status.exabgp === 'object' ? status.exabgp : {};
+    }
+
+    function bgpSessionBlock(status) {
+      return status?.bgp && typeof status.bgp === 'object' ? status.bgp : {};
+    }
+
+    function bgpChannelBlock(status) {
+      return status?.announcement_channel && typeof status.announcement_channel === 'object' ? status.announcement_channel : {};
+    }
+
+    function bgpRemoteValidationBlock(status) {
+      return status?.remote_validation && typeof status.remote_validation === 'object' ? status.remote_validation : {};
+    }
+
+    function bgpSessionState(status) {
+      if (!status) return 'UNKNOWN';
+      const declared = String(bgpSessionBlock(status).state || '').toLowerCase();
+      const raw = declared || String(status.bgp_state || 'unknown').toLowerCase();
+      if (raw === 'verification_disabled') return 'DISABLED';
+      if (['established', 'up'].includes(raw)) return 'ESTABLISHED';
+      if (['connecting', 'active', 'connect', 'opensent', 'openconfirm'].includes(raw)) return 'CONNECTING';
+      if (['idle', 'down', 'not_established'].includes(raw)) return 'DOWN';
+      return 'UNKNOWN';
+    }
+
     function bgpPeerOperationalState(status) {
-      const aggregate = String(status?.bgp_state || 'unknown').toLowerCase();
-      if (aggregate === 'verification_disabled') return 'VERIFICACAO DESABILITADA';
-      if (['established', 'up'].includes(aggregate)) return 'UP';
-      if (['idle', 'active', 'connect', 'down', 'not_established'].includes(aggregate)) return 'DOWN';
+      const state = bgpSessionState(status);
+      if (state === 'ESTABLISHED') return 'UP';
+      if (state === 'CONNECTING') return 'CONNECTING';
+      if (state === 'DOWN') return 'DOWN';
+      if (state === 'DISABLED') return 'VERIFICACAO DESABILITADA';
       return 'NAO VERIFICADO';
     }
 
@@ -15774,9 +15802,10 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
     }
 
     function bgpFlowspecOperationalState(status, connector) {
-      const raw = String(status?.flowspec_state || 'not_verified').toLowerCase();
+      const declared = String(status?.flowspec?.state || '').toLowerCase();
+      const raw = declared || String(status?.flowspec_state || 'not_verified').toLowerCase();
       if (raw === 'verification_disabled') return 'VERIFICACAO DESABILITADA';
-      if (['established', 'up'].includes(raw)) return 'UP';
+      if (['established', 'up', 'available'].includes(raw)) return 'UP';
       if (['idle', 'active', 'connect', 'down', 'not_established'].includes(raw)) return 'DOWN';
       return 'NAO VERIFICADO';
     }
@@ -15799,22 +15828,9 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
     }
 
     function bgpConnectorReadinessState(status, connector = null) {
-      if (!status || !status.last_checked_at) return 'NOT_VERIFIED';
-      if (status.readiness && typeof status.readiness.ready === 'boolean') {
-        return status.readiness.ready ? 'READY' : 'NOT_READY';
-      }
-      const bgpState = bgpPeerOperationalState(status);
-      const flowspecState = bgpFlowspecOperationalState(status, connector);
-      const pipeState = bgpPipeDetailedState(status, connector);
-      const checks = status.checks || {};
-      const serviceOk = checks.service_ok ?? status.service_ok ?? status.service?.active;
-      const bgpOk = checks.bgp_ok ?? status.bgp_ok ?? status.session?.tcp_established ?? bgpState === 'UP';
-      const flowspecOk = checks.flowspec_ok ?? status.flowspec_ok ?? flowspecState === 'UP';
-      const pipeOk = checks.pipe_ok ?? status.pipe_ok ?? pipeState === 'OK';
-      const closeWaitOk = checks.close_wait_ok ?? status.close_wait_ok ?? !Boolean(status.session?.close_wait_alert);
-      if (serviceOk && bgpOk && flowspecOk && pipeOk && closeWaitOk) return 'READY';
-      if (serviceOk === false || bgpOk === false || flowspecOk === false || pipeOk === false || closeWaitOk === false || bgpState === 'DOWN' || flowspecState === 'DOWN' || ['ABSENT', 'NO_READER', 'UNAVAILABLE'].includes(pipeState)) return 'NOT_READY';
-      return 'NOT_VERIFIED';
+      // Kept for backward compatibility with existing callers: the canonical
+      // values are READY | DEGRADED | DOWN | UNKNOWN.
+      return bgpReadinessStatus(status, connector);
     }
 
     function bgpPipeDetailedBadge(state) {
@@ -15828,13 +15844,41 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
       return bgpStatusBadge(presentation[0], presentation[1]);
     }
 
-    function bgpReadinessBadge(state) {
-      const presentation = {
+    function bgpReadinessPresentation(state) {
+      return {
         READY: ['Pronto', 'ok'],
-        NOT_READY: ['Não pronto', 'down'],
-        NOT_VERIFIED: ['Não verificado', 'not_verified']
+        DEGRADED: ['Degradado', 'warn'],
+        DOWN: ['Down', 'down'],
+        UNKNOWN: ['Desconhecido', 'not_verified'],
+        NOT_VERIFIED: ['Não verificado', 'not_verified'],
+        NOT_READY: ['Não pronto', 'down']
       }[state] || ['Não verificado', 'not_verified'];
+    }
+
+    function bgpReadinessBadge(state) {
+      const presentation = bgpReadinessPresentation(state);
       return bgpStatusBadge(presentation[0], presentation[1]);
+    }
+
+    function bgpReadinessLabel(state) {
+      return bgpReadinessPresentation(state)[0];
+    }
+
+    function bgpReadinessStatus(status) {
+      if (!status || !status.last_checked_at) return 'UNKNOWN';
+      const readiness = status.readiness || {};
+      const declared = String(readiness.state || '').toLowerCase();
+      if (['ready', 'degraded', 'down', 'unknown'].includes(declared)) {
+        return declared.toUpperCase();
+      }
+      if (typeof readiness.ready === 'boolean') {
+        if (readiness.ready) return 'READY';
+        const session = bgpSessionState(status);
+        if (session === 'ESTABLISHED') return 'DEGRADED';
+        if (session === 'DOWN' || session === 'CONNECTING') return 'DOWN';
+        return 'UNKNOWN';
+      }
+      return 'UNKNOWN';
     }
 
     function renderBgpInfrastructureSummary() {
@@ -15851,7 +15895,7 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
       setText('bgpInfraTotal', formatNumber(bgpConnectors.length));
       setText('bgpInfraBgpEstablished', formatNumber(states.filter(item => item.bgp === 'UP').length));
       setText('bgpInfraBgpUnverified', formatNumber(states.filter(item => item.bgp === 'NAO VERIFICADO').length));
-      setText('bgpInfraBgpDown', formatNumber(states.filter(item => item.bgp === 'DOWN').length));
+      setText('bgpInfraBgpDown', formatNumber(states.filter(item => ['DOWN', 'CONNECTING'].includes(item.bgp)).length));
       setText('bgpInfraFlowspecEstablished', formatNumber(states.filter(item => item.flowspec === 'UP').length));
       setText('bgpInfraFlowspecUnverified', formatNumber(states.filter(item => item.flowspec === 'NAO VERIFICADO').length));
       setText('bgpInfraPipesOk', formatNumber(states.filter(item => item.pipe === 'OK').length));
@@ -15865,16 +15909,26 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
       return `<div class="anomaly-response-detail-item"><div class="anomaly-response-detail-label">${escapeHtml(label)}</div><div>${escapeHtml(value)}</div></div>`;
     }
 
+    function bgpChannelStateLabel(status) {
+      const state = String(bgpChannelBlock(status).state || '').toLowerCase();
+      if (state === 'ready') return 'Ready';
+      if (state === 'degraded') return 'Degradado';
+      if (state === 'down') return 'Down';
+      if (state === 'na') return 'N/A';
+      return 'Não verificado';
+    }
+
     function bgpConnectorRecommendation(status, connector) {
       const readiness = bgpConnectorReadinessState(status, connector);
       if (readiness === 'READY') return 'Conector pronto para anunciar pelo lado do ExaBGP. A instalação da rota no Huawei não foi verificada.';
       if (!status) return 'Execute uma checagem para obter evidência operacional atual.';
-      if (status.service?.check_possible === false) return 'O backend em container não consegue verificar o serviço systemd do host; configure o Host Agent (GMJFLOW_HOST_AGENT_URL) para evidência real.';
-      if (!status.service?.active) return 'Verifique o serviço systemd do ExaBGP no host.';
-      if (bgpPeerOperationalState(status) === 'DOWN') return 'Peer BGP indisponível; verifique a sessão e os eventos posteriores de desconexão.';
-      if (bgpPeerOperationalState(status) === 'NAO VERIFICADO') return 'Peer BGP não verificado; confirme evidência atual do ExaBGP.';
+      if (status.service?.check_possible === false && !bgpExabgpBlock(status).service_state) return 'O backend em container não consegue verificar o serviço systemd do host; configure o Host Agent (GMJFLOW_HOST_AGENT_URL) para evidência real do ExaBGP.';
+      const session = bgpSessionState(status);
+      if (session === 'DOWN') return 'Sessão BGP indisponível; verifique a sessão e os eventos posteriores de desconexão.';
+      if (session === 'CONNECTING') return 'Sessão BGP em conexão; aguarde o estabelecimento para anunciar.';
+      if (session === 'UNKNOWN') return 'Sessão BGP não confirmada pelo ExaBGP local; verifique o Host Agent e os eventos do ExaBGP.';
       if (bgpFlowspecOperationalState(status, connector) !== 'UP') return 'Família FlowSpec não confirmada; revise o bloco family e a diretiva ipv4 flow do neighbor na configuração ExaBGP.';
-      if (bgpPipeDetailedState(status, connector) === 'NO_READER') return 'Inicie ou recupere o leitor persistente do FIFO deste conector.';
+      if (bgpPipeDetailedState(status, connector) === 'NO_READER') return 'Inicie ou recupere o leitor persistente do FIFO deste conector (canal de anúncio degradado).';
       if (connector?.passive_listen_enabled && !status.listener?.listening) return 'Listener TCP/179 indisponível no host para este conector passivo.';
       return 'Verifique o FIFO configurado e as mensagens técnicas do Host Agent.';
     }
@@ -15888,22 +15942,37 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
       const pipeExists = pipe.exists ?? pipe.input_exists;
       const readerActive = pipe.reader_active;
       const flowspecEnabled = status && bgpFlowspecOperationalState(status, connector) === 'UP';
+      const sessionState = bgpSessionState(status);
+      const listenerRequired = status?.listener?.required !== undefined ? Boolean(status.listener.required) : Boolean(connector?.passive_listen_enabled);
+      const remoteValidation = bgpRemoteValidationBlock(status);
+      const remotePresentation = {
+        verified: 'Verificado',
+        not_verified: 'Não verificado',
+        failed: 'Falhou',
+        disabled: 'Desabilitado'
+      }[String(remoteValidation.state || '').toLowerCase()] || 'Não verificado';
       const calculated = [
-        bgpConnectorDetailField('Serviço compartilhado', status?.service?.active ? 'Ativo' : status ? 'Indisponível' : 'Não verificado'),
-        bgpConnectorDetailField('Listener TCP/179', status?.listener?.listening ? 'Em escuta' : status ? 'Indisponível' : 'Não verificado'),
-        bgpConnectorDetailField('BGP', status ? (bgpPeerOperationalState(status) === 'UP' ? 'Estabelecido' : bgpPeerOperationalState(status) === 'DOWN' ? 'Indisponível' : 'Não verificado') : 'Não verificado'),
-        bgpConnectorDetailField('FlowSpec', status ? (flowspecEnabled ? 'Habilitado no ExaBGP' : bgpFlowspecOperationalState(status, connector) === 'DOWN' ? 'Indisponível' : 'Não verificado') : 'Não verificado'),
+        bgpConnectorDetailField('Serviço compartilhado', status?.service?.active ? 'Ativo' : status?.service?.check_possible === false ? 'Não verificável' : status ? 'Indisponível' : 'Não verificado'),
+        bgpConnectorDetailField('Listener TCP/179', !listenerRequired ? 'N/A (conexão ativa do ExaBGP)' : status?.listener?.listening ? 'Em escuta' : status ? 'Indisponível' : 'Não verificado'),
+        bgpConnectorDetailField('BGP', sessionState === 'ESTABLISHED' ? 'Established' : sessionState === 'CONNECTING' ? 'Conectando' : sessionState === 'DOWN' ? 'Indisponível' : 'Não verificado'),
+        bgpConnectorDetailField('Sessão TCP (diagnóstico)', status?.session?.tcp_established ? 'TCP estabelecido' : status ? 'TCP não estabelecido' : 'Não verificado'),
+        bgpConnectorDetailField('FlowSpec', status ? (flowspecEnabled ? 'IPv4 FlowSpec habilitado no ExaBGP' : bgpFlowspecOperationalState(status, connector) === 'DOWN' ? 'Indisponível' : 'Não verificado') : 'Não verificado'),
+        bgpConnectorDetailField('Canal de anúncio', status ? bgpChannelStateLabel(status) : 'Não verificado'),
         bgpConnectorDetailField('Pipe', bgpPipeDetailedState(status, connector).replace('NO_READER', 'Pipe sem leitor').replace('NOT_VERIFIED', 'Não verificado').replace('UNAVAILABLE', 'Indisponível').replace('ABSENT', 'Ausente').replace('OK', 'OK')),
         bgpConnectorDetailField('CLOSE_WAIT', status?.session?.close_wait_count ?? 0),
         bgpConnectorDetailField('Recv-Q máximo', status?.session?.recv_q_max ?? 0),
-        bgpConnectorDetailField('Prontidão', bgpConnectorReadinessState(status, connector).replace('NOT_VERIFIED', 'Não verificado').replace('NOT_READY', 'Não pronto').replace('READY', 'Pronto')),
+        bgpConnectorDetailField('Diagnóstico remoto (opcional)', remotePresentation),
+        bgpConnectorDetailField('Prontidão', bgpReadinessLabel(bgpConnectorReadinessState(status, connector))),
         bgpConnectorDetailField('Motivo exato', (status?.readiness?.reasons || []).map(reason => ({
           exabgp_service_inactive: 'serviço systemd inativo',
           exabgp_service_unverified: 'serviço systemd não verificável no container (use host-agent)',
           tcp_listener_unavailable: 'listener TCP/179 indisponível',
           peer_bgp_down: 'sessão BGP do peer indisponível',
-          peer_bgp_not_verified: 'sessão BGP do peer não verificada',
+          peer_bgp_connecting: 'sessão BGP em conexão',
+          peer_bgp_not_verified: 'sessão BGP não confirmada pelo ExaBGP local',
+          peer_bgp_stale_state: 'snapshot de estado BGP desatualizado',
           flowspec_down: 'IPv4 FlowSpec ausente na configuração',
+          flowspec_unsupported: 'IPv4 FlowSpec não suportado',
           flowspec_not_verified: 'configuração IPv4 FlowSpec não verificada',
           exabgp_pipe_unavailable: 'FIFO ausente, inválido ou sem leitor'
         }[reason] || reason)).join('; '))
@@ -15954,10 +16023,10 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
       const rows = bgpConnectors.map(connector => {
         const status = bgpStatusForConnector(connector);
         const checking = bgpConnectorChecksInFlight.has(Number(connector.id));
-        const bgpState = bgpPeerOperationalState(status);
+        const bgpState = bgpSessionState(status);
         const flowspecState = bgpFlowspecOperationalState(status, connector);
         const readiness = bgpConnectorReadinessState(status, connector);
-        const bgpKind = bgpState === 'UP' ? 'up' : bgpState === 'DOWN' ? 'down' : bgpState === 'VERIFICACAO DESABILITADA' ? 'disabled' : 'not_verified';
+        const bgpKind = bgpState === 'ESTABLISHED' ? 'up' : bgpState === 'DOWN' ? 'down' : bgpState === 'CONNECTING' ? 'warn' : bgpState === 'DISABLED' ? 'disabled' : 'not_verified';
         const flowKind = flowspecState === 'UP' ? 'up' : flowspecState === 'DOWN' ? 'down' : flowspecState === 'VERIFICACAO DESABILITADA' ? 'disabled' : 'not_verified';
         const pipe = bgpPipePayload(status);
         const fifoExists = pipe.exists ?? pipe.input_exists;
@@ -15967,24 +16036,30 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
         const closeWaitCount = Number(status?.session?.close_wait_count || 0);
         const closeWaitAlert = Boolean(status?.session?.close_wait_alert);
         const serviceName = status?.service?.name || connector.systemd_service_name || 'exabgp-gmj-flow.service';
+        const exabgpBlock = bgpExabgpBlock(status);
+        const serviceState = String(exabgpBlock.service_state || '').toLowerCase();
         const serviceChecked = status?.service?.check_possible !== false;
-        const serviceActive = Boolean(status?.service?.active);
-        const serviceLabel = serviceActive ? `${serviceName} · ativo` : serviceChecked ? `${serviceName} · indisponível` : `${serviceName} · não verificado`;
-        const serviceKind = serviceActive ? 'ok' : serviceChecked ? 'down' : 'not_verified';
+        const serviceActive = serviceState ? serviceState === 'running' : Boolean(status?.service?.active);
+        const serviceLabel = serviceActive
+          ? `${serviceName} · ativo`
+          : (serviceState === 'unknown' || (!serviceState && !serviceChecked))
+            ? `${serviceName} · não verificável`
+            : `${serviceName} · indisponível`;
+        const serviceKind = serviceActive ? 'ok' : (serviceState === 'unknown' || (!serviceState && !serviceChecked)) ? 'not_verified' : 'down';
         const listenerRequired = status?.listener?.required !== undefined ? Boolean(status.listener.required) : Boolean(connector?.passive_listen_enabled);
         const listenerListening = Boolean(status?.listener?.listening);
-        const listenerLabel = !listenerRequired ? 'Não exigido (active-connect)' : listenerListening ? 'TCP/179 em escuta' : status ? 'Listener indisponível' : 'Listener não verificado';
-        const listenerKind = !listenerRequired ? 'ok' : listenerListening ? 'ok' : status ? 'down' : 'not_verified';
+        const listenerLabel = !listenerRequired ? 'N/A · conexão ativa (cliente)' : listenerListening ? 'TCP/179 em escuta' : status ? 'Listener indisponível' : 'Listener não verificado';
+        const listenerKind = !listenerRequired ? 'off' : listenerListening ? 'ok' : status ? 'down' : 'not_verified';
         return `
           <tr>
             <td>${escapeHtml(connector.name || `#${connector.id}`)}</td>
             <td>${escapeHtml(connector.peer_ip || '-')}</td>
             <td>${bgpStatusBadge(serviceLabel, serviceKind)}</td>
             <td>${bgpStatusBadge(listenerLabel, listenerKind)}</td>
-            <td>${bgpStatusBadge(bgpState === 'UP' ? 'BGP estabelecido' : bgpState === 'DOWN' ? 'BGP indisponível' : bgpState === 'NAO VERIFICADO' ? 'BGP não verificado' : bgpState, bgpKind)}</td>
+            <td>${bgpStatusBadge(bgpState === 'ESTABLISHED' ? 'BGP estabelecido' : bgpState === 'CONNECTING' ? 'BGP conectando' : bgpState === 'DOWN' ? 'BGP indisponível' : bgpState === 'DISABLED' ? 'BGP verificação desabilitada' : 'BGP não verificado', bgpKind)}</td>
             <td>${bgpStatusBadge(flowspecState === 'UP' ? 'FlowSpec habilitado no ExaBGP' : flowspecState === 'DOWN' ? 'FlowSpec indisponível' : flowspecState === 'NAO VERIFICADO' ? 'FlowSpec não verificado' : flowspecState, flowKind)}</td>
             <td>${bgpStatusBadge(fifoExists && fifoValid ? 'FIFO válido' : fifoExists === false ? 'FIFO ausente' : 'FIFO não verificado', fifoExists && fifoValid ? 'ok' : fifoExists === false ? 'down' : 'not_verified')}</td>
-            <td>${bgpStatusBadge(readerActive ? (readerWaiting ? 'Leitor aguardando escritor' : 'Leitor ativo') : status ? 'Sem leitor' : 'Leitor não verificado', readerActive ? 'ok' : status ? 'down' : 'not_verified')}</td>
+            <td>${bgpStatusBadge(readerActive ? (readerWaiting ? 'Leitor aguardando escritor' : 'Leitor ativo') : status ? 'Sem leitor' : 'Leitor não verificado', readerActive ? 'ok' : status ? 'warn' : 'not_verified')}</td>
             <td>${bgpStatusBadge(`${closeWaitCount}${closeWaitAlert ? ' · alerta' : ''}`, closeWaitAlert ? 'down' : 'ok')}</td>
             <td>${bgpReadinessBadge(readiness)}</td>
             <td>${escapeHtml(formatDateTime(status?.last_checked_at) || '-')}</td>
