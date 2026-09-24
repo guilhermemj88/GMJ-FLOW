@@ -3834,7 +3834,10 @@ class BgpMitigationTest(unittest.TestCase):
             with patch.object(main, "router_ssh_status", return_value={"enabled": True, "bgp_state": "established", "flowspec_state": "not_verified", "message": ""}), \
                  patch.object(main, "host_agent_status", return_value={"enabled": False, "message": ""}):
                 status = main.bgp_connector_status(connector)
-            self.assertEqual(status["bgp_state"], "established")
+            # Router SSH is optional validation: it never defines the local
+            # session state (source of truth = local ExaBGP FSM).
+            self.assertEqual(status["bgp_state"], "unknown")
+            self.assertEqual(status["remote_validation"]["state"], "verified")
             self.assertEqual(status["flowspec_state"], "not_verified")
             self.assertFalse(status["verification"]["flowspec_verified"])
             self.assertEqual(status["verification"]["flowspec_active_announcements"], 0)
@@ -3885,10 +3888,10 @@ class BgpMitigationTest(unittest.TestCase):
                 """
                 UPDATE bgp_connectors
                 SET bgp_state = 'established', flowspec_state = 'established', pipe_state = 'ok',
-                    status_message = 'persisted', last_checked_at = '2026-07-19T12:00:00Z'
+                    status_message = 'persisted', last_checked_at = ?
                 WHERE id = ?
                 """,
-                (connector["id"],),
+                (main.utc_now_iso(), connector["id"]),
             )
             conn.commit()
             conn.close()
@@ -4073,7 +4076,7 @@ class BgpMitigationTest(unittest.TestCase):
                      patch.object(main, "host_agent_status", return_value={"enabled": False}):
                     status = main.check_and_persist_bgp_connector_status(connector["id"])
             self.assertEqual(status["pipe_state"], "ok")
-            self.assertEqual(status["bgp_state"], "not_verified")
+            self.assertEqual(status["bgp_state"], "unknown")
             self.assertEqual(status["flowspec_state"], "not_verified")
             self.assertIn("desabilitada", status["message"].lower())
             ssh_command.assert_not_called()
@@ -4082,7 +4085,7 @@ class BgpMitigationTest(unittest.TestCase):
                     "SELECT bgp_state, flowspec_state, pipe_state, last_checked_at FROM bgp_connectors WHERE id = ?",
                     (connector["id"],),
                 ).fetchone()
-            self.assertEqual(persisted["bgp_state"], "not_verified")
+            self.assertEqual(persisted["bgp_state"], "unknown")
             self.assertEqual(persisted["flowspec_state"], "not_verified")
             self.assertEqual(persisted["pipe_state"], "ok")
             self.assertTrue(persisted["last_checked_at"])
@@ -4103,7 +4106,8 @@ class BgpMitigationTest(unittest.TestCase):
                      patch.object(main, "host_agent_status", return_value={"enabled": False}):
                     status = main.bgp_connector_status(connector)
             conn.close()
-        self.assertEqual(status["bgp_state"], "not_verified")
+        self.assertEqual(status["bgp_state"], "unknown")
+        self.assertFalse(status["bgp"]["fsm_confirmed"])
         self.assertEqual(status["exabgp_peer"]["state"], "unknown")
         self.assertEqual(status["exabgp_log_peer"]["state"], "established")
         self.assertTrue(any("nao autoriza" in message for message in status["messages"]))
@@ -4155,7 +4159,7 @@ class BgpMitigationTest(unittest.TestCase):
                  patch.object(main, "host_agent_status", return_value={"enabled": False}), \
                  patch.object(main, "exabgp_peer_from_log_heuristic", return_value={"state": "unknown"}):
                 status = main.check_and_persist_bgp_connector_status(connector["id"])
-            self.assertEqual(status["bgp_state"], "not_verified")
+            self.assertEqual(status["bgp_state"], "unknown")
             self.assertEqual(status["flowspec_state"], "not_verified")
             self.assertTrue(any("timeout" in error.lower() for error in status["errors"]))
             with main.sqlite_connection() as check:
@@ -4177,11 +4181,12 @@ class BgpMitigationTest(unittest.TestCase):
             conn.close()
             finished = []
 
-            def begin_connector(connector_id, owner=""):
-                if connector_id == first["id"]:
+            def begin_connector(connector, owner="", shared_snapshot=None):
+                if connector["id"] == first["id"]:
                     raise RuntimeError("first failed")
                 self.assertEqual(owner, "automatic")
-                return {"connector": {"id": connector_id}}
+                self.assertIsInstance(shared_snapshot, dict)
+                return {"connector": {"id": connector["id"]}}
 
             def finish_connector(execution):
                 finished.append(execution["connector"]["id"])
@@ -5120,16 +5125,16 @@ class BgpMitigationTest(unittest.TestCase):
             "flowspec_state": "established",
         }
         scenarios = (
-            ("service_ok", "exabgp_service_inactive"),
-            ("bgp_ok", "peer_bgp_not_verified"),
-            ("flowspec_ok", "flowspec_not_verified"),
-            ("pipe_ok", "exabgp_pipe_unavailable"),
-            ("close_wait_ok", "close_wait_above_threshold"),
+            ({"service_ok": False}, "exabgp_service_inactive"),
+            ({"bgp_state": "not_verified"}, "peer_bgp_not_verified"),
+            ({"flowspec_ok": False}, "flowspec_not_verified"),
+            ({"pipe_ok": False}, "exabgp_pipe_unavailable"),
+            ({"close_wait_ok": False}, "close_wait_above_threshold"),
         )
-        for field, reason in scenarios:
-            with self.subTest(field=field):
+        for overrides, reason in scenarios:
+            with self.subTest(overrides=overrides):
                 readiness = main.evaluate_bgp_connector_readiness(
-                    {**base, field: False}
+                    {**base, **overrides}
                 )
                 self.assertFalse(readiness["ready"])
                 self.assertIn(reason, readiness["reasons"])
@@ -5168,7 +5173,7 @@ class BgpMitigationTest(unittest.TestCase):
         self.assertEqual(readiness["confirmation_level"], "peer_established")
         self.assertIn("Familia FlowSpec nao confirmada", readiness["reason_message"])
 
-    def test_readiness_uses_peer_specific_tcp_session_as_bgp_source_of_truth(self):
+    def test_readiness_does_not_treat_tcp_socket_as_bgp_session_proof(self):
         status = {
             "service": {"active": True},
             "bgp_state": "not_verified",
@@ -5178,9 +5183,12 @@ class BgpMitigationTest(unittest.TestCase):
             "pipes": {"ok": True, "is_fifo": True, "reader_active": True},
         }
         readiness = main.evaluate_bgp_connector_readiness(status)
-        self.assertTrue(readiness["ready"])
-        self.assertTrue(readiness["bgp_ok"])
-        self.assertEqual(readiness["confirmation_level"], "peer_established")
+        # TCP ESTABLISHED is diagnostics only: the local ExaBGP FSM is the
+        # source of truth for the session state.
+        self.assertFalse(readiness["ready"])
+        self.assertFalse(readiness["bgp_ok"])
+        self.assertEqual(readiness["session_state"], "unknown")
+        self.assertEqual(readiness["reason"], "peer_bgp_not_verified")
 
     def test_established_peer_with_unavailable_pipe_is_not_ready(self):
         status = {

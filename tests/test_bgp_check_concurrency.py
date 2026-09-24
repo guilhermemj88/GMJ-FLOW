@@ -141,7 +141,7 @@ class BgpGenerationCoordinatorTest(unittest.TestCase):
         started = threading.Event()
         finish = threading.Event()
 
-        def slow_status(_connector):
+        def slow_status(_connector, _shared_snapshot=None):
             started.set()
             finish.wait(1)
             return {"bgp_state": "established"}
@@ -194,7 +194,7 @@ class BgpTimeoutIsolationTest(unittest.TestCase):
             "last_checked_at": "2026-07-22T11:00:00+00:00",
         }
 
-        def slow_down_status(_connector):
+        def slow_down_status(_connector, _shared_snapshot=None):
             started.set()
             finish.wait(1)
             return {

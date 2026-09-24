@@ -19,6 +19,15 @@ def load_readiness_definitions() -> dict[str, Any]:
         "normalize_systemd_service_name",
         "bgp_readiness_reason_message",
         "evaluate_bgp_connector_readiness",
+        "normalize_bgp_session_state",
+        "bgp_exabgp_state_from_status",
+        "bgp_session_state_from_status",
+        "bgp_flowspec_state_from_status",
+        "bgp_flowspec_block_from_status",
+        "pipe_explicitly_absent",
+        "bgp_announcement_channel_from_status",
+        "compute_bgp_delivery_evidence",
+        "bgp_remote_validation_from_status",
     }
     selected = [
         node

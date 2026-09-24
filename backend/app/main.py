@@ -12624,6 +12624,91 @@ def host_agent_status(connector: dict[str, Any]) -> dict[str, Any]:
         return {"enabled": True, "method": "host_agent", "available": False, "message": str(exc)}
 
 
+def host_agent_status_multi(connector_group: list[dict[str, Any]]) -> dict[str, Any]:
+    """Single Host Agent request for every peer sharing service/config/pipe."""
+    if not GMJFLOW_HOST_AGENT_URL:
+        return {
+            "enabled": False,
+            "method": "host_agent",
+            "message": "Host Agent nao configurado. Defina GMJFLOW_HOST_AGENT_URL para status systemd/ss/logs do host.",
+        }
+    base = dict(connector_group[0])
+    service = resolve_bgp_connector_service(base)
+    peers = list(
+        dict.fromkeys(
+            clean_text(item.get("peer_ip"))
+            for item in connector_group
+            if clean_text(item.get("peer_ip"))
+        )
+    )
+    params = urllib.parse.urlencode(
+        {
+            "service": service["name"],
+            "peer_ips": ",".join(peers),
+            "listen_port": int(base.get("listen_port") or 179),
+            "pipe_path": clean_text(base.get("exabgp_pipe_in")),
+            "log_path": GMJFLOW_EXABGP_LOG_PATH,
+            "config_path": bgp_connector_config_key(base),
+            "listener_required": (
+                "true"
+                if sqlite_bool(base.get("passive_listen_enabled"))
+                else "false"
+            ),
+        }
+    )
+    try:
+        headers: dict[str, str] = {}
+        if GMJFLOW_HOST_AGENT_TOKEN:
+            headers["Authorization"] = f"Bearer {GMJFLOW_HOST_AGENT_TOKEN}"
+        request = urllib.request.Request(
+            f"{GMJFLOW_HOST_AGENT_URL}/bgp/status?{params}",
+            method="GET",
+            headers=headers,
+        )
+        with urllib.request.urlopen(request, timeout=8) as response:
+            payload = json.loads(response.read().decode("utf-8", errors="replace"))
+        if not isinstance(payload, dict):
+            raise ValueError("Resposta Host Agent invalida")
+        return {"enabled": True, "method": "host_agent", **payload}
+    except urllib.error.HTTPError as exc:
+        if exc.code == 401:
+            return {
+                "enabled": True,
+                "method": "host_agent",
+                "available": False,
+                "message": "Host Agent rejeitou a autenticacao (401); verifique GMJFLOW_HOST_AGENT_TOKEN.",
+            }
+        return {"enabled": True, "method": "host_agent", "available": False, "message": str(exc)}
+    except Exception as exc:
+        return {"enabled": True, "method": "host_agent", "available": False, "message": str(exc)}
+
+
+def build_bgp_health_snapshot(connectors: list[dict[str, Any]]) -> dict[str, Any]:
+    """One health snapshot per refresh, shared by every connector row.
+
+    Connectors sharing the same ExaBGP service/config/FIFO are queried through
+    a single Host Agent request (all peers at once), so systemctl/ss/journalctl
+    run once per shared service instead of once per connector.
+    """
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for connector in connectors:
+        groups.setdefault(bgp_snapshot_group_key(connector), []).append(connector)
+    snapshot: dict[str, Any] = {
+        "collected_at": utc_now_iso(),
+        "host_agent_url_configured": bool(GMJFLOW_HOST_AGENT_URL),
+        "groups": {},
+    }
+    for key, members in groups.items():
+        snapshot["groups"][key] = {
+            "host_agent": (
+                host_agent_status_multi(members)
+                if GMJFLOW_HOST_AGENT_URL
+                else None
+            ),
+        }
+    return snapshot
+
+
 def bgp_close_wait_alert_threshold() -> int:
     try:
         configured = int(os.getenv("GMJFLOW_BGP_CLOSE_WAIT_ALERT_THRESHOLD", "5"))
@@ -12726,20 +12811,6 @@ def record_bgp_admin_audit(
         ),
     )
     return int(cursor.lastrowid)
-
-
-def prefer_verified_state(*states: Any) -> str:
-    for state in states:
-        text = clean_text(state).lower()
-        if text in {"established", "up"}:
-            return "established"
-        if text in {"idle", "active", "connect", "down", "not_established"}:
-            return "down"
-    for state in states:
-        text = clean_text(state).lower()
-        if text and text not in {"unknown", "not_verified"}:
-            return text
-    return "not_verified"
 
 
 def active_flowspec_announcement_count(connector: dict[str, Any]) -> int:
@@ -12901,7 +12972,388 @@ def normalize_bgp_pipe_payload(status: dict[str, Any]) -> dict[str, Any]:
     return normalized
 
 
-def bgp_connector_status(connector: dict[str, Any]) -> dict[str, Any]:
+def normalize_bgp_session_state(value: Any) -> str:
+    """Canonical BGP session vocabulary: established|connecting|down|unknown."""
+    text = clean_text(value).lower()
+    if text in {"established", "up", "ready"}:
+        return "established"
+    if text in {"connecting", "active", "connect", "opensent", "openconfirm"}:
+        return "connecting"
+    if text in {"idle", "down", "not_established"}:
+        return "down"
+    return "unknown"
+
+
+def bgp_snapshot_group_key(connector: dict[str, Any]) -> str:
+    service = resolve_bgp_connector_service(connector)
+    return "|".join(
+        [
+            service["name"],
+            clean_text(connector.get("exabgp_config_path")) or GMJFLOW_EXABGP_CONFIG_PATH,
+            clean_text(connector.get("exabgp_pipe_in")),
+        ]
+    )
+
+
+def bgp_agent_peer_payload(
+    agent_status: dict[str, Any],
+    peer_ip: str,
+) -> dict[str, Any] | None:
+    """Extract the per-peer payload from single or multi Host Agent answers."""
+    peers = agent_status.get("peers")
+    if isinstance(peers, dict) and peers:
+        candidate = peers.get(peer_ip)
+        return candidate if isinstance(candidate, dict) else None
+    reported_peer = clean_text(agent_status.get("peer_ip"))
+    if not peer_ip or not reported_peer or reported_peer == peer_ip:
+        return agent_status
+    return None
+
+
+def bgp_agent_status_for_connector(
+    connector: dict[str, Any],
+    shared_snapshot: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Host Agent evidence for one connector, reusing the shared snapshot."""
+    peer_ip = clean_text(connector.get("peer_ip"))
+    if isinstance(shared_snapshot, dict):
+        groups = shared_snapshot.get("groups")
+        if isinstance(groups, dict):
+            group = groups.get(bgp_snapshot_group_key(connector))
+            if isinstance(group, dict) and "host_agent" in group:
+                agent_payload = group.get("host_agent")
+                if not isinstance(agent_payload, dict):
+                    return {
+                        "enabled": bool(GMJFLOW_HOST_AGENT_URL),
+                        "method": "host_agent",
+                        "available": False,
+                        "message": "Host Agent indisponivel nesta coleta (snapshot compartilhado).",
+                    }
+                peer_payload = bgp_agent_peer_payload(agent_payload, peer_ip)
+                if peer_payload is None:
+                    return {
+                        "enabled": True,
+                        "method": "host_agent",
+                        "available": False,
+                        "message": "Peer nao retornado pelo Host Agent para este conector.",
+                    }
+                result = dict(peer_payload)
+                result["enabled"] = True
+                result["available"] = bool(agent_payload.get("available", True))
+                result["peers"] = agent_payload.get("peers") or {}
+                return result
+    return host_agent_status(connector)
+
+
+def bgp_session_state_from_status(status: dict[str, Any]) -> str:
+    block = status.get("bgp") if isinstance(status.get("bgp"), dict) else {}
+    if clean_text(block.get("state")):
+        return normalize_bgp_session_state(block.get("state"))
+    raw = clean_text(status.get("bgp_state")).lower()
+    if raw:
+        if raw in {
+            "not_verified",
+            "unknown",
+            "not_checked",
+            "verification_disabled",
+            "stale",
+        }:
+            return "unknown"
+        return normalize_bgp_session_state(raw)
+    peer = status.get("exabgp_peer") if isinstance(status.get("exabgp_peer"), dict) else {}
+    state = normalize_bgp_session_state(peer.get("state"))
+    if state != "unknown":
+        return state
+    explicit = bgp_status_check_value(status, "bgp_ok", None)
+    if explicit is True:
+        return "established"
+    return "unknown"
+
+
+def bgp_flowspec_state_from_status(status: dict[str, Any]) -> str:
+    """Canonical FlowSpec vocabulary: available|down|unsupported|unknown."""
+    block = status.get("flowspec") if isinstance(status.get("flowspec"), dict) else {}
+    declared = clean_text(block.get("state")).lower()
+    if declared in {"available", "down", "unsupported", "unknown"}:
+        return declared
+    raw = clean_text(status.get("flowspec_state")).lower()
+    if raw in {"established", "up"}:
+        return "available"
+    if raw in {"down", "idle", "active", "connect", "not_established"}:
+        return "down"
+    if raw == "unsupported":
+        return "unsupported"
+    explicit = bgp_status_check_value(status, "flowspec_ok", None)
+    if explicit is True:
+        return "available"
+    return "unknown"
+
+
+def bgp_exabgp_state_from_status(status: dict[str, Any]) -> dict[str, Any]:
+    block = status.get("exabgp") if isinstance(status.get("exabgp"), dict) else {}
+    service = status.get("service") if isinstance(status.get("service"), dict) else {}
+    declared = clean_text(block.get("service_state")).lower()
+    explicit_service = bgp_status_check_value(status, "service_ok", None)
+    if declared in {"running", "inactive", "unknown"}:
+        service_state = declared
+    elif isinstance(explicit_service, bool):
+        # Legacy flat schema: service_ok at the top level is the evidence.
+        service_state = (
+            "running"
+            if explicit_service
+            else "unknown"
+            if service.get("check_possible") is False
+            else "inactive"
+        )
+    elif bool(service.get("active")):
+        service_state = "running"
+    elif service.get("check_possible") is False:
+        service_state = "unknown"
+    else:
+        service_state = "inactive"
+    process_state = clean_text(block.get("process_state")).lower()
+    if process_state not in {"running", "stopped", "unknown"}:
+        process_state = {
+            "running": "running",
+            "inactive": "stopped",
+        }.get(service_state, "unknown")
+    return {
+        "service_state": service_state,
+        "process_state": process_state,
+        "check_possible": bool(
+            block.get(
+                "check_possible",
+                service.get("check_possible") is not False,
+            )
+        ),
+        "active": service_state == "running",
+    }
+
+
+def compute_bgp_delivery_evidence(status: dict[str, Any]) -> dict[str, Any]:
+    """Single source for the FIFO delivery path evidence (backend + host agent)."""
+    pipes = normalize_bgp_pipe_payload(status)
+    pipe_ok = bool(bgp_status_check_value(status, "pipe_ok", pipes.get("ok", False)))
+    reader_active = bool(pipes.get("reader_active"))
+    input_path = clean_text(pipes.get("input_path"))
+    backend_pipes = status.get("backend_pipes")
+    if not isinstance(backend_pipes, dict):
+        backend_pipes = exabgp_backend_delivery_path_status(
+            input_path,
+            clean_text(pipes.get("output_path")),
+        )
+    host_agent = status.get("host_agent") if isinstance(status.get("host_agent"), dict) else {}
+    host_agent_reachable = bool(
+        host_agent.get("enabled") and host_agent.get("available")
+    )
+    host_agent_pipes = normalize_bgp_pipe_payload(host_agent)
+    host_agent_reader_active = bool(host_agent_pipes.get("reader_active"))
+    if not host_agent_reader_active and clean_text(pipes.get("source")) == "host_agent":
+        host_agent_reader_active = reader_active
+    host_agent_delivery_ready = bool(
+        host_agent_reachable and host_agent_reader_active
+    )
+    pipe_is_direct = clean_text(pipes.get("source")) != "host_agent"
+    direct_pipe_ready = bool(
+        pipe_ok
+        and pipe_is_direct
+        and bool(pipes.get("is_fifo"))
+        and reader_active
+    )
+    operational_delivery_ready = bool(
+        pipe_ok and pipe_is_direct and not direct_pipe_ready
+    )
+    if direct_pipe_ready:
+        delivery_path_ready = True
+        delivery_path_source = "direct_pipe"
+        delivery_path_reason = "direct_pipe_reader_verified"
+    elif host_agent_delivery_ready:
+        delivery_path_ready = True
+        delivery_path_source = "host_agent"
+        delivery_path_reason = "delivery_verified_via_host_agent"
+    elif operational_delivery_ready:
+        delivery_path_ready = False
+        delivery_path_source = "operational_evidence"
+        delivery_path_reason = "delivery_reader_unverified"
+    else:
+        delivery_path_ready = False
+        delivery_path_source = "unavailable"
+        delivery_path_reason = (
+            "host_agent_delivery_unavailable"
+            if host_agent_reachable and not host_agent_reader_active
+            else clean_text(backend_pipes.get("reason"))
+            or "delivery_path_unverified"
+        )
+    return {
+        "pipe_ok": pipe_ok,
+        "reader_active": reader_active,
+        "reader_waiting_for_writer": bool(pipes.get("reader_waiting_for_writer")),
+        "direct_pipe_ready": direct_pipe_ready,
+        "host_agent_reachable": host_agent_reachable,
+        "host_agent_delivery_ready": host_agent_delivery_ready,
+        "operational_delivery_ready": operational_delivery_ready,
+        "delivery_path_ready": delivery_path_ready,
+        "delivery_path_source": delivery_path_source,
+        "delivery_path_reason": delivery_path_reason,
+        "backend_pipes": backend_pipes,
+    }
+
+
+def pipe_explicitly_absent(pipes: dict[str, Any]) -> bool:
+    """True only when the payload proves the FIFO is missing or not a FIFO."""
+    exists = pipes.get("exists", pipes.get("input_exists"))
+    if exists is False:
+        return True
+    return pipes.get("is_fifo") is False
+
+
+def bgp_announcement_channel_from_status(status: dict[str, Any]) -> dict[str, Any]:
+    """Announcement channel: FIFO + reader + delivery path, never the session."""
+    pipes = normalize_bgp_pipe_payload(status)
+    raw_pipes = status.get("pipes") if isinstance(status.get("pipes"), dict) else status.get("pipe")
+    if not isinstance(raw_pipes, dict):
+        raw_pipes = {}
+    configured_path = clean_text(pipes.get("input_path"))
+    evidence = compute_bgp_delivery_evidence(status)
+    configured = bool(configured_path or raw_pipes)
+    fifo_present = bool(raw_pipes) and not pipe_explicitly_absent(raw_pipes)
+    if not configured and not evidence["pipe_ok"]:
+        channel_state = "na"
+    elif evidence["delivery_path_ready"]:
+        channel_state = "ready"
+    elif evidence["reader_active"] or fifo_present:
+        # FIFO is usable (or the reader was explicitly observed), but the
+        # delivery path is not fully proven: degraded channel, not a down one.
+        channel_state = "degraded"
+    else:
+        channel_state = "down"
+    if evidence["reader_active"]:
+        reader_state = (
+            "waiting" if evidence["reader_waiting_for_writer"] else "active"
+        )
+    elif configured:
+        reader_state = "missing"
+    else:
+        reader_state = "unknown"
+    return {
+        "state": channel_state,
+        "pipe_ok": evidence["pipe_ok"],
+        "pipe": pipes,
+        "reader_active": evidence["reader_active"],
+        "reader_state": reader_state,
+        "delivery_path_ready": evidence["delivery_path_ready"],
+        "delivery_path_source": evidence["delivery_path_source"],
+        "delivery_path_reason": evidence["delivery_path_reason"],
+        "reasons": (
+            []
+            if channel_state in {"ready", "na"}
+            else [evidence["delivery_path_reason"]]
+        ),
+    }
+
+
+def bgp_flowspec_block_from_status(status: dict[str, Any]) -> dict[str, Any]:
+    block = status.get("flowspec") if isinstance(status.get("flowspec"), dict) else {}
+    merged = dict(block)
+    merged["state"] = bgp_flowspec_state_from_status(status)
+    merged.setdefault("source", "exabgp_config" if merged.get("configured") else "none")
+    return merged
+
+
+def bgp_remote_validation_from_status(status: dict[str, Any]) -> dict[str, Any]:
+    """Optional Router SSH validation. Never gates the local session state."""
+    router = status.get("router_check") if isinstance(status.get("router_check"), dict) else {}
+    enabled = bool(router.get("enabled"))
+    if not enabled:
+        return {
+            "state": "disabled",
+            "required": False,
+            "router_bgp_state": clean_text(router.get("bgp_state")),
+            "router_flowspec_state": clean_text(router.get("flowspec_state")),
+            "message": clean_text(router.get("message")),
+        }
+    returncodes = router.get("returncodes") or {}
+    failed_commands = [
+        name for name, code in dict(returncodes).items() if int(code or 0) != 0
+    ]
+    router_bgp = clean_text(router.get("bgp_state")).lower()
+    router_flowspec = clean_text(router.get("flowspec_state")).lower()
+    if router_bgp in {"established", "up"} or router_flowspec in {"established", "up"}:
+        validation_state = "verified"
+    elif failed_commands or (
+        clean_text(router.get("message")) and not returncodes and not router.get("skipped")
+    ):
+        validation_state = "failed"
+    else:
+        validation_state = "not_verified"
+    return {
+        "state": validation_state,
+        "required": False,
+        "router_bgp_state": router_bgp or "unknown",
+        "router_flowspec_state": router_flowspec or "unknown",
+        "failed_commands": failed_commands,
+        "message": clean_text(router.get("message")),
+        "skipped": bool(router.get("skipped")),
+    }
+
+
+def bgp_snapshot_stale_seconds() -> int:
+    """Max age of a persisted snapshot before it is reported as stale.
+
+    Defaults to three checker cycles with a 90s floor (the BGP recommended
+    hold time), so an old snapshot is never displayed as a current session.
+    """
+    try:
+        configured = int(os.getenv("GMJFLOW_BGP_SNAPSHOT_STALE_SECONDS", "0"))
+    except ValueError:
+        configured = 0
+    if configured > 0:
+        return configured
+    return max(90, 3 * bgp_check_interval_seconds())
+
+
+def bgp_status_age_seconds(checked_at: Any) -> float | None:
+    parsed = parse_datetime_text(clean_text(checked_at))
+    if parsed is None:
+        return None
+    return max(0.0, (datetime.now(timezone.utc) - parsed).total_seconds())
+
+
+def apply_bgp_snapshot_staleness(status: dict[str, Any]) -> dict[str, Any]:
+    """Downgrade an old persisted snapshot instead of showing it forever."""
+    result = dict(status)
+    age = bgp_status_age_seconds(result.get("last_checked_at"))
+    stale_after = bgp_snapshot_stale_seconds()
+    if age is None or age <= stale_after:
+        return result
+    result["stale"] = True
+    result["stale_seconds"] = int(age)
+    result["stale_after_seconds"] = int(stale_after)
+    block = dict(result.get("bgp")) if isinstance(result.get("bgp"), dict) else {}
+    block.update(
+        {
+            "state": "unknown",
+            "stale": True,
+            "stale_reason": "snapshot_older_than_ttl",
+        }
+    )
+    result["bgp"] = block
+    if clean_text(result.get("bgp_state")).lower() in {
+        "established",
+        "connecting",
+        "up",
+        "idle",
+        "active",
+        "connect",
+    }:
+        result["bgp_state"] = "unknown"
+    return result
+
+
+def bgp_connector_status(
+    connector: dict[str, Any],
+    shared_snapshot: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     errors: list[str] = []
     messages: list[str] = []
     service_resolution = resolve_bgp_connector_service(connector)
@@ -12990,7 +13442,7 @@ def bgp_connector_status(connector: dict[str, Any]) -> dict[str, Any]:
     }
     if heuristic_peer.get("state") == "established":
         messages.append("Log recente sugere peer conectado, mas essa heuristica nao autoriza anuncio.")
-    agent_status = host_agent_status(connector)
+    agent_status = bgp_agent_status_for_connector(connector, shared_snapshot)
     agent_available = bool(agent_status.get("enabled") and agent_status.get("available"))
     agent_pipe: dict[str, Any] = {}
     if agent_available:
@@ -13122,25 +13574,33 @@ def bgp_connector_status(connector: dict[str, Any]) -> dict[str, Any]:
             "message": "Verificacao Router SSH nao exigida; lado ExaBGP confirmado pelo Host Agent." if agent_confirms_exabgp else "Verificacao BGP/FlowSpec desabilitada para este conector.",
         }
 
+    bgp_source = "none"
+    fsm_confirmed = False
+    bgp_uptime_seconds: int | None = None
+    bgp_changed_at = ""
+    bgp_last_update = utc_now_iso()
     if agent_available:
-        bgp_state = "established" if tcp_established else (
-            "down"
-            if bool((agent_status.get("session") or {}).get("query_ok", True))
-            else "not_verified"
+        bgp_state = normalize_bgp_session_state(agent_bgp_state)
+        bgp_source = clean_text(agent_status.get("source")) or "host_agent"
+        fsm_confirmed = bool(agent_status.get("fsm_confirmed"))
+        bgp_uptime_seconds = agent_status.get("uptime_seconds")
+        bgp_changed_at = clean_text(agent_status.get("changed_at"))
+        bgp_last_update = (
+            clean_text(
+                agent_status.get("last_update") or agent_status.get("observed_at")
+            )
+            or bgp_last_update
         )
-    elif ss_available and session_status in {"established", "not_established"}:
-        bgp_state = "established" if tcp_established else "down"
     else:
-        bgp_state = prefer_verified_state(
-            exabgp_peer.get("state"),
-            router_status.get("bgp_state") if connector.get("router_check_enabled") else None,
-        )
+        # No ExaBGP-local evidence: report UNKNOWN. TCP/179, Router SSH and the
+        # log heuristic below are diagnostics only and never claim Established;
+        # only ExaBGP-side FSM evidence (Host Agent) sets the session state.
+        bgp_state = "unknown"
+        bgp_source = "none"
     if agent_available and agent_flowspec_state in {"established", "down", "not_verified"}:
         flowspec_state = agent_flowspec_state
     else:
-        flowspec_state = prefer_verified_state(
-            router_status.get("flowspec_state") if connector.get("router_check_enabled") else None
-        )
+        flowspec_state = "not_verified"
     for check_name, return_code in (router_status.get("returncodes") or {}).items():
         if int(return_code or 0) != 0:
             errors.append(f"Router SSH {check_name}: {router_status.get('message') or f'return code {return_code}'}")
@@ -13158,7 +13618,7 @@ def bgp_connector_status(connector: dict[str, Any]) -> dict[str, Any]:
     # Local rows and a writable FIFO are metrics, never evidence of a BGP or
     # FlowSpec session.  In particular, do not infer an established peer from
     # an announcement that this application itself previously marked active.
-    if bgp_state == "not_verified":
+    if bgp_state in {"unknown", "not_verified"}:
         messages.append("Estado do peer BGP nao confirmado pelo ExaBGP.")
     if flowspec_state == "not_verified":
         messages.append("Familia FlowSpec nao confirmada pelo ExaBGP.")
@@ -13210,7 +13670,7 @@ def bgp_connector_status(connector: dict[str, Any]) -> dict[str, Any]:
     checks = {
         "service_ok": service_active,
         "listener_ok": listening if passive_listen else True,
-        "bgp_ok": tcp_established,
+        "bgp_ok": bgp_state == "established",
         "flowspec_ok": flowspec_state == "established",
         "pipe_ok": pipes_ok,
         "close_wait_ok": not close_wait_alert,
@@ -13251,7 +13711,84 @@ def bgp_connector_status(connector: dict[str, Any]) -> dict[str, Any]:
         "messages": sorted(set(messages)),
     }
     result["readiness"] = evaluate_bgp_connector_readiness(result)
+    service_state = (
+        "running"
+        if service_active
+        else "inactive"
+        if service_check_possible
+        else "unknown"
+    )
+    agent_process = (
+        agent_status.get("process")
+        if agent_available and isinstance(agent_status.get("process"), dict)
+        else None
+    )
+    if agent_process:
+        process_state = clean_text(agent_process.get("state")) or "unknown"
+        process_pid = agent_process.get("main_pid")
+        process_started_at = clean_text(agent_process.get("started_at"))
+    else:
+        process_state = (
+            "running"
+            if service_state == "running"
+            else "stopped"
+            if service_state == "inactive"
+            else "unknown"
+        )
+        process_pid = None
+        process_started_at = ""
+    result["exabgp"] = {
+        "service_state": service_state,
+        "process_state": process_state,
+        "service_active": service_active,
+        "check_possible": bool(service_check_possible or agent_available),
+        "shared": bool(service_info.get("shared")),
+        "name": service_name,
+        "pid": process_pid,
+        "started_at": process_started_at,
+        "source": "host_agent" if agent_available else "container",
+    }
+    result["bgp"] = {
+        "state": bgp_state,
+        "source": bgp_source,
+        "fsm_confirmed": fsm_confirmed,
+        "peer": peer_ip,
+        "uptime_seconds": bgp_uptime_seconds,
+        "last_change_at": bgp_changed_at,
+        "last_update": bgp_last_update,
+        "tcp": {
+            "established": tcp_established,
+            "query_ok": bool(ss_available or agent_available),
+            "close_wait_count": close_wait_count,
+            "close_wait_alert": close_wait_alert,
+            "recv_q_max": recv_q_max,
+            "recv_q_alert": recv_q_alert,
+        },
+        "stale": False,
+    }
+    result["announcement_channel"] = bgp_announcement_channel_from_status(result)
+    result["flowspec"] = bgp_flowspec_block_from_status(result)
+    result["remote_validation"] = bgp_remote_validation_from_status(result)
+    result["readiness"] = evaluate_bgp_connector_readiness(result)
     return result
+
+
+def apply_bgp_readiness_blocks(
+    result: dict[str, Any],
+    readiness: dict[str, Any],
+) -> None:
+    """Copy the structured readiness blocks onto a persisted/returned status."""
+    for block_key in (
+        "exabgp",
+        "bgp",
+        "announcement_channel",
+        "flowspec",
+        "remote_validation",
+        "session_health",
+        "control_plane",
+    ):
+        if isinstance(readiness.get(block_key), dict):
+            result[block_key] = readiness[block_key]
 
 
 def normalize_bgp_connector_status_snapshot(connector: dict[str, Any], status: dict[str, Any]) -> dict[str, Any]:
@@ -13286,6 +13823,7 @@ def normalize_bgp_connector_status_snapshot(connector: dict[str, Any], status: d
     result["readiness"] = readiness
     result["checks"] = readiness["checks"]
     result.update(readiness["checks"])
+    apply_bgp_readiness_blocks(result, readiness)
     if readiness["bgp_ok"] and clean_text(result.get("bgp_state")).lower() in {
         "",
         "unknown",
@@ -13329,20 +13867,11 @@ def persist_bgp_connector_status_snapshot(
 
 
 def bgp_peer_state_from_status(status: dict[str, Any]) -> str:
-    bgp_state = clean_text(status.get("bgp_state")).lower()
-    exabgp_state = clean_text((status.get("exabgp_peer") or {}).get("state")).lower()
-    explicit_bgp_ok = bgp_status_check_value(status, "bgp_ok", None)
-    if explicit_bgp_ok is True:
+    """Legacy announcement vocabulary: established|down|not_verified."""
+    state = bgp_session_state_from_status(status)
+    if state == "established":
         return "established"
-    if bgp_state in {"established", "up"}:
-        return "established"
-    if bgp_state in {"idle", "active", "connect", "down", "not_established"}:
-        return "down"
-    if bgp_state in {"not_verified", "unknown"}:
-        return "not_verified"
-    if exabgp_state in {"established", "up"}:
-        return "established"
-    if exabgp_state in {"idle", "active", "connect", "down", "not_established"}:
+    if state == "down":
         return "down"
     return "not_verified"
 
@@ -13388,6 +13917,9 @@ def compact_bgp_status_details(status: dict[str, Any]) -> dict[str, Any]:
         "host_agent_evidence": host_agent.get("evidence") or {},
         "host_agent_pipes": host_agent_pipes,
         "backend_pipes": status.get("backend_pipes") or {},
+        "session_state": bgp_session_state_from_status(status),
+        "announcement_channel_state": bgp_announcement_channel_from_status(status).get("state"),
+        "remote_validation_state": bgp_remote_validation_from_status(status).get("state"),
         "messages": status.get("messages") or [],
         "errors": status.get("errors") or [],
     }
@@ -13397,8 +13929,11 @@ def bgp_readiness_reason_message(reason: str) -> str:
     return {
         "peer_bgp_not_verified": "Estado do peer BGP nao confirmado; anuncio nao enviado.",
         "peer_bgp_down": "Peer BGP indisponivel; anuncio nao enviado.",
+        "peer_bgp_connecting": "Sessao BGP em conexao; anuncio nao enviado.",
+        "peer_bgp_stale_state": "Snapshot de estado BGP desatualizado; anuncio nao enviado.",
         "flowspec_not_verified": "Familia FlowSpec nao confirmada; anuncio nao enviado.",
         "flowspec_down": "Familia FlowSpec indisponivel; anuncio nao enviado.",
+        "flowspec_unsupported": "Familia FlowSpec nao suportada pelo ExaBGP; anuncio nao enviado.",
         "exabgp_service_inactive": "Servico ExaBGP indisponivel; anuncio nao enviado.",
         "exabgp_service_unverified": "Servico ExaBGP nao verificavel no container; use host-agent para evidencia do host.",
         "tcp_listener_unavailable": "Listener TCP/179 indisponivel; anuncio nao enviado.",
@@ -13415,14 +13950,9 @@ def bgp_readiness_reason_message(reason: str) -> str:
 
 
 def evaluate_bgp_connector_readiness(status: dict[str, Any]) -> dict[str, Any]:
-    raw_peer_state = clean_text(status.get("bgp_state")).lower()
-    service = status.get("service") or {}
-    service_active = bool(
-        bgp_status_check_value(
-            status, "service_ok", service.get("active")
-        )
-    )
-    service_checked = bool(service.get("check_possible", True))
+    exabgp = bgp_exabgp_state_from_status(status)
+    service_active = bool(exabgp.get("active"))
+    service_checked = bool(exabgp.get("check_possible", True))
     listener = status.get("listener") or {}
     session = status.get("session") or {}
     listener_ok = bool(
@@ -13430,30 +13960,30 @@ def evaluate_bgp_connector_readiness(status: dict[str, Any]) -> dict[str, Any]:
             status, "listener_ok", listener.get("listening", False)
         )
     )
-    bgp_ok = bool(
-        bgp_status_check_value(
-            status,
-            "bgp_ok",
-            session.get(
-                "tcp_established",
-                raw_peer_state in {"established", "up"},
-            ),
-        )
+    session_state = bgp_session_state_from_status(status)
+    session_stale = bool(
+        (isinstance(status.get("bgp"), dict) and status["bgp"].get("stale"))
+        or status.get("stale")
     )
-    if bgp_ok or raw_peer_state in {"established", "up"}:
+    if session_stale:
+        session_state = "unknown"
+    bgp_ok = session_state == "established"
+    if session_state == "established":
         peer_state = "established"
-    elif raw_peer_state in {"idle", "active", "connect", "down", "not_established"}:
+    elif session_state == "down":
         peer_state = "down"
     else:
         peer_state = "not_verified"
-    flowspec_state = clean_text(status.get("flowspec_state")).lower()
+    flowspec_block = bgp_flowspec_block_from_status(status)
+    flowspec_state = clean_text(flowspec_block.get("state")).lower() or "unknown"
     flowspec_ok = bool(
         bgp_status_check_value(
             status,
             "flowspec_ok",
-            flowspec_state in {"established", "up"},
+            flowspec_state == "available",
         )
     )
+    channel = bgp_announcement_channel_from_status(status)
     pipes = normalize_bgp_pipe_payload(status)
     pipe_ok = bool(
         bgp_status_check_value(status, "pipe_ok", pipes.get("ok", False))
@@ -13461,74 +13991,19 @@ def evaluate_bgp_connector_readiness(status: dict[str, Any]) -> dict[str, Any]:
     reader_active = bool(pipes.get("reader_active"))
     input_path = clean_text(pipes.get("input_path"))
 
-    # Direct path evidence: the backend container itself can see and write the
-    # FIFO (filesystem/permission checks only — never opens the FIFO).
-    backend_pipes = status.get("backend_pipes")
-    if not isinstance(backend_pipes, dict):
-        backend_pipes = exabgp_backend_delivery_path_status(
-            input_path,
-            clean_text(pipes.get("output_path")),
-        )
+    # Delivery path evidence (FIFO visibility + reader) is computed once and
+    # shared with the announcement channel block. It never changes the session.
+    delivery = compute_bgp_delivery_evidence(status)
+    direct_pipe_ready = delivery["direct_pipe_ready"]
+    host_agent_delivery_ready = delivery["host_agent_delivery_ready"]
+    backend_pipes = delivery["backend_pipes"]
+    delivery_path_ready = delivery["delivery_path_ready"]
+    delivery_path_source = delivery["delivery_path_source"]
+    delivery_path_reason = delivery["delivery_path_reason"]
     direct_pipe_visible = bool(
         backend_pipes.get("backend_pipe_in_visible")
         or backend_pipes.get("backend_mount_visible")
     )
-
-    # Host-agent path evidence: when the host-agent is the component
-    # responsible for delivery, its own reader evidence is sufficient and the
-    # backend container is NOT required to see the FIFO directly.
-    host_agent = status.get("host_agent")
-    if not isinstance(host_agent, dict):
-        host_agent = {}
-    host_agent_reachable = bool(
-        host_agent.get("enabled") and host_agent.get("available")
-    )
-    host_agent_pipes = normalize_bgp_pipe_payload(host_agent)
-    host_agent_reader_active = bool(host_agent_pipes.get("reader_active"))
-    if not host_agent_reader_active and clean_text(pipes.get("source")) == "host_agent":
-        host_agent_reader_active = reader_active
-    host_agent_delivery_ready = bool(
-        host_agent_reachable and host_agent_reader_active
-    )
-
-    pipe_is_direct = clean_text(pipes.get("source")) != "host_agent"
-    # Direct pipe with a PROVEN reader/consumer: the payload explicitly asserts
-    # both a FIFO and an active reader. A writable-only pipe (or the backend's
-    # own exabgp_pipe_status / exabgp_backend_delivery_path_status view, which
-    # never inspect the reader) is NOT sufficient on its own.
-    direct_pipe_ready = bool(
-        pipe_ok
-        and pipe_is_direct
-        and bool(pipes.get("is_fifo"))
-        and reader_active
-    )
-    # Operational evidence: pipe exists/writable but the reader is unverified.
-    # Persisted for diagnosis only — it must never gate delivery on its own.
-    operational_delivery_ready = bool(
-        pipe_ok and pipe_is_direct and not direct_pipe_ready
-    )
-
-    if direct_pipe_ready:
-        delivery_path_ready = True
-        delivery_path_source = "direct_pipe"
-        delivery_path_reason = "direct_pipe_reader_verified"
-    elif host_agent_delivery_ready:
-        delivery_path_ready = True
-        delivery_path_source = "host_agent"
-        delivery_path_reason = "delivery_verified_via_host_agent"
-    elif operational_delivery_ready:
-        delivery_path_ready = False
-        delivery_path_source = "operational_evidence"
-        delivery_path_reason = "delivery_reader_unverified"
-    else:
-        delivery_path_ready = False
-        delivery_path_source = "unavailable"
-        delivery_path_reason = (
-            "host_agent_delivery_unavailable"
-            if host_agent_reachable and not host_agent_reader_active
-            else clean_text(backend_pipes.get("reason"))
-            or "delivery_path_unverified"
-        )
     close_wait_count = int(session.get("close_wait_count") or 0)
     close_wait_threshold = int(session.get("close_wait_alert_threshold") or 0)
     if isinstance(session.get("close_wait_alert"), bool):
@@ -13561,17 +14036,23 @@ def evaluate_bgp_connector_readiness(status: dict[str, Any]) -> dict[str, Any]:
         elif not service_proven_operational:
             failed_reasons.append("exabgp_service_unverified")
     if not bgp_ok:
-        failed_reasons.append(
-            "peer_bgp_down" if peer_state == "down" else "peer_bgp_not_verified"
-        )
+        if session_stale:
+            failed_reasons.append("peer_bgp_stale_state")
+        elif peer_state == "down":
+            failed_reasons.append("peer_bgp_down")
+        elif session_state == "connecting":
+            failed_reasons.append("peer_bgp_connecting")
+        else:
+            failed_reasons.append("peer_bgp_not_verified")
     if listener_required and not transport_ready:
         failed_reasons.append("tcp_listener_unavailable")
     if not flowspec_ok:
-        failed_reasons.append(
-            "flowspec_down"
-            if flowspec_state in {"idle", "active", "connect", "down", "not_established"}
-            else "flowspec_not_verified"
-        )
+        if flowspec_state == "unsupported":
+            failed_reasons.append("flowspec_unsupported")
+        elif flowspec_state == "down":
+            failed_reasons.append("flowspec_down")
+        else:
+            failed_reasons.append("flowspec_not_verified")
     if not pipe_ok:
         failed_reasons.append("exabgp_pipe_unavailable")
     if not delivery_path_ready:
@@ -13621,6 +14102,60 @@ def evaluate_bgp_connector_readiness(status: dict[str, Any]) -> dict[str, Any]:
         "delivery_path_ready": delivery_path_ready,
     }
     ready = all(required_checks.values())
+    session_reasons = [
+        failed
+        for failed in failed_reasons
+        if failed
+        in {
+            "exabgp_service_inactive",
+            "exabgp_service_unverified",
+            "peer_bgp_down",
+            "peer_bgp_not_verified",
+            "peer_bgp_connecting",
+            "peer_bgp_stale_state",
+        }
+    ]
+    control_reasons = [
+        failed for failed in failed_reasons if failed not in session_reasons
+    ]
+    if ready:
+        control_plane_state = "ready"
+    elif service_checked and not service_active:
+        control_plane_state = "down"
+    elif session_state in {"down", "connecting"}:
+        control_plane_state = "down"
+    elif session_state == "established":
+        control_plane_state = "degraded"
+    else:
+        control_plane_state = "unknown"
+    if bgp_ok and service_gate_ok:
+        session_health_state = "ready"
+    elif session_state in {"down", "connecting"} or (
+        service_checked and not service_active
+    ):
+        session_health_state = "down"
+    else:
+        session_health_state = "unknown"
+    overall_state = (
+        "ready"
+        if ready
+        else "down"
+        if control_plane_state == "down"
+        else "degraded"
+        if session_state == "established"
+        else "unknown"
+    )
+    bgp_block = dict(status.get("bgp")) if isinstance(status.get("bgp"), dict) else {}
+    bgp_block.update(
+        {
+            "state": session_state,
+            "peer": bgp_block.get("peer") or clean_text(session.get("peer_ip")),
+            "stale": session_stale,
+        }
+    )
+    bgp_block.setdefault("source", "unknown")
+    bgp_block.setdefault("fsm_confirmed", False)
+    remote_validation = bgp_remote_validation_from_status(status)
     details = compact_bgp_status_details(status)
     details["checks"] = checks
     details["technical_reason"] = reason
@@ -13629,19 +14164,40 @@ def evaluate_bgp_connector_readiness(status: dict[str, Any]) -> dict[str, Any]:
         check_name for check_name, ok in required_checks.items() if not ok
     ]
     details["reasons"] = failed_reasons
+    details["session_reasons"] = session_reasons
+    details["control_reasons"] = control_reasons
     details["listener_informational"] = not listener_required
     details["listener_required"] = listener_required
     details["transport_ready"] = transport_ready
     details["delivery_path_source"] = delivery_path_source
     details["delivery_path_reason"] = delivery_path_reason
     details["reader_active"] = reader_active
-    details["host_agent_reachable"] = host_agent_reachable
+    details["host_agent_reachable"] = delivery["host_agent_reachable"]
     details["direct_pipe_visible"] = direct_pipe_visible
     details["host_agent_delivery_ready"] = host_agent_delivery_ready
     details["direct_pipe_ready"] = direct_pipe_ready
+    details["session_state"] = session_state
+    details["announcement_channel_state"] = channel.get("state")
+    details["remote_validation_state"] = remote_validation.get("state")
     return {
         "ready": ready,
+        "state": overall_state,
+        "session_state": session_state,
+        "session_stale": session_stale,
         "peer_state": peer_state,
+        "session_health": {
+            "state": session_health_state,
+            "reasons": session_reasons,
+        },
+        "control_plane": {
+            "state": control_plane_state,
+            "reasons": control_reasons,
+        },
+        "announcement_channel": channel,
+        "flowspec": flowspec_block,
+        "remote_validation": remote_validation,
+        "exabgp": exabgp,
+        "bgp": bgp_block,
         "checks": checks,
         **checks,
         "reason": reason,
@@ -13655,7 +14211,7 @@ def evaluate_bgp_connector_readiness(status: dict[str, Any]) -> dict[str, Any]:
         "delivery_path_source": delivery_path_source,
         "delivery_path_reason": delivery_path_reason,
         "reader_active": reader_active,
-        "host_agent_reachable": host_agent_reachable,
+        "host_agent_reachable": delivery["host_agent_reachable"],
         "direct_pipe_visible": direct_pipe_visible,
         "details": details,
     }
@@ -13852,7 +14408,11 @@ def shutdown_bgp_status_check_executor(wait: bool = True) -> None:
         release_bgp_status_check_lock(connector_id, token)
 
 
-def submit_bgp_connector_status_check(connector: dict[str, Any], lease: dict[str, Any]) -> Future:
+def submit_bgp_connector_status_check(
+    connector: dict[str, Any],
+    lease: dict[str, Any],
+    shared_snapshot: dict[str, Any] | None = None,
+) -> Future:
     connector_id = int(connector["id"])
     token = clean_text(lease.get("token"))
     executor = start_bgp_status_check_executor()
@@ -13860,7 +14420,7 @@ def submit_bgp_connector_status_check(connector: dict[str, Any], lease: dict[str
         entry = BGP_STATUS_CHECK_LOCKS.get(connector_id)
         if entry is None or clean_text(entry.get("token")) != token or entry.get("state") != "running":
             raise BgpStatusCheckTimedOut(connector_id, clean_text(lease.get("started_at")))
-        future = executor.submit(bgp_connector_status, connector)
+        future = executor.submit(bgp_connector_status, connector, shared_snapshot)
         entry["future"] = future
     future.add_done_callback(
         lambda completed, connector_key=connector_id, execution_token=token: bgp_status_check_future_done(
@@ -14096,10 +14656,12 @@ def persisted_bgp_connector_status(connector: dict[str, Any]) -> dict[str, Any]:
         "message": connector.get("status_message") or result.get("message") or "",
         "errors": connector.get("status_errors") or result.get("errors") or [],
     })
+    result = apply_bgp_snapshot_staleness(result)
     readiness = evaluate_bgp_connector_readiness(result)
     result["readiness"] = readiness
     result["checks"] = readiness["checks"]
     result.update(readiness["checks"])
+    apply_bgp_readiness_blocks(result, readiness)
     return result
 
 
@@ -14123,12 +14685,13 @@ def bgp_connector_for_status_check(connector_id_or_connector: int | dict[str, An
 def begin_bgp_connector_status_check(
     connector_id_or_connector: int | dict[str, Any],
     owner: str = "",
+    shared_snapshot: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     connector = bgp_connector_for_status_check(connector_id_or_connector)
     connector_id = int(connector["id"])
     lease = acquire_bgp_status_check_lock(connector_id, owner)
     try:
-        future = submit_bgp_connector_status_check(connector, lease)
+        future = submit_bgp_connector_status_check(connector, lease, shared_snapshot)
     except Exception:
         release_bgp_status_check_lock(connector_id, clean_text(lease.get("token")))
         raise
@@ -14212,18 +14775,35 @@ def run_bgp_connector_status_checks_once() -> dict[str, int | bool]:
     try:
         ensure_sensor_db()
         with sqlite_connection() as conn:
-            connector_ids = [
-                int(row["id"])
-                for row in conn.execute(
-                    "SELECT id FROM bgp_connectors WHERE enabled = 1 AND is_active = 1 ORDER BY id"
-                ).fetchall()
-            ]
-        if not connector_ids:
+            rows = conn.execute(
+                "SELECT * FROM bgp_connectors WHERE enabled = 1 AND is_active = 1 ORDER BY id"
+            ).fetchall()
+            connectors: list[dict[str, Any]] = []
+            for row in rows:
+                connector = bgp_connector_row_to_dict(row)
+                connector["router_password"] = (
+                    row["router_password"] if "router_password" in row.keys() else ""
+                )
+                service = resolve_bgp_connector_service(connector, conn)
+                connector["_shared_systemd_service_name"] = service["name"]
+                connector["_systemd_service_source"] = service["source"]
+                connectors.append(connector)
+        if not connectors:
             return stats
+        # One health snapshot per cycle: connectors sharing the same ExaBGP
+        # service/config/pipe are queried together (all peers in one request).
+        shared_snapshot = build_bgp_health_snapshot(connectors)
         executions: list[dict[str, Any]] = []
-        for connector_id in connector_ids:
+        for connector in connectors:
+            connector_id = int(connector["id"])
             try:
-                executions.append(begin_bgp_connector_status_check(connector_id, owner="automatic"))
+                executions.append(
+                    begin_bgp_connector_status_check(
+                        connector,
+                        owner="automatic",
+                        shared_snapshot=shared_snapshot,
+                    )
+                )
             except BgpStatusCheckInProgress:
                 stats["skipped"] = int(stats["skipped"]) + 1
             except Exception as exc:
@@ -15643,14 +16223,20 @@ def connector_persisted_readiness(connector: dict[str, Any]) -> dict[str, Any]:
             "checks": {},
             "reason": "readiness_not_checked",
         }
-    readiness = evaluate_bgp_connector_readiness(snapshot)
+    readiness = evaluate_bgp_connector_readiness(
+        apply_bgp_snapshot_staleness(snapshot)
+    )
     return {
         "ready": bool(readiness.get("ready")),
-        "state": "ready" if readiness.get("ready") else "not_ready",
+        "state": clean_text(readiness.get("state"))
+        or ("ready" if readiness.get("ready") else "not_ready"),
         "checked_at": snapshot.get("last_checked_at") or connector.get("last_checked_at") or "",
         "checks": dict(readiness.get("checks") or {}),
         "reason": clean_text(readiness.get("reason")),
         "reasons": list(readiness.get("reasons") or []),
+        "session_health": readiness.get("session_health") or {},
+        "control_plane": readiness.get("control_plane") or {},
+        "remote_validation": readiness.get("remote_validation") or {},
     }
 
 
