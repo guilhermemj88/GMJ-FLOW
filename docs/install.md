@@ -77,7 +77,18 @@ GMJFLOW_EXABGP_LOG_PATH=/var/log/exabgp-gmj-flow.log
 GMJFLOW_EXABGP_CONFIG_PATH=/etc/exabgp/gmj-flow-ne8000.conf
 ```
 
-O agente expõe `GET /bgp/status?service=<systemd>&peer_ip=<ip>&listen_port=179&pipe_path=<fifo>&log_path=/var/log/exabgp-gmj-flow.log&config_path=/etc/exabgp/gmj-flow-ne8000.conf`. Cada consulta usa o FIFO do conector e é somente leitura: ela nunca abre nem escreve no FIFO. `bgp_ok` vem da sessão TCP ESTABLISHED do peer solicitado e `flowspec_ok` vem do bloco `family { ipv4 flow; }` desse mesmo neighbor.
+O agente expõe `GET /bgp/status?service=<systemd>&peer_ip=<ip>&listen_port=179&pipe_path=<fifo>&log_path=/var/log/exabgp-gmj-flow.log&config_path=/etc/exabgp/gmj-flow-ne8000.conf`. Para consultar vários peers de um mesmo serviço/config/FIFO numa única coleta, use `peer_ips=<ip1>,<ip2>`: o serviço, o listener, os sockets e o log são lidos uma única vez por requisição. Cada consulta é somente leitura: ela nunca abre nem escreve no FIFO.
+
+A fonte de verdade da sessão é o **FSM do ExaBGP local** (journald ou arquivo de log): `peers[<ip>].state` retorna `established`, `connecting`, `down` ou `unknown`, com `previous_state`, `changed_at`, `last_update` e a evidência do último evento do peer. `flowspec_ok` vem do bloco `family { ipv4 flow; }` do neighbor na configuração do ExaBGP.
+
+Separação operacional exibida em Segurança → BGP / Conectores:
+
+- **Sessão BGP**: estado FSM do ExaBGP local (`Established`, `Conectando`, `Down`, `Desconhecido`). Um socket TCP/179 ESTABLISHED é diagnóstico secundário e **nunca** promove a sessão para Established sozinho; a ausência do socket também não rebaixa um FSM Established válido — quando o TCP e o FSM divergem, a sessão é reportada como `Desconhecido`, não como DOWN.
+- **Canal de anúncio**: FIFO do conector + leitor + caminho de entrega (`Ready`, `Degradado`, `Down`, `N/A`). FIFO válido sem leitor comprovado torna o canal `Degradado`; a sessão BGP permanece Established.
+- **Listener TCP/179**: em modo active-connect (o ExaBGP inicia a conexão como cliente) o listener local não é exigido e a UI mostra `N/A`. Só é exigido quando o conector é passivo (`passive_listen_enabled`).
+- **Validação remota (opcional)**: Router SSH/SNMP/CLI do roteador (`Verificado`, `Não verificado`, `Falhou`, `Desabilitado`). Esse diagnóstico nunca define nem rebaixa a sessão local.
+
+A coluna **Prontidão** reflete: `Pronto` (sessão Established + canal de anúncio disponível), `Degradado` (sessão Established com recurso auxiliar de anúncio indisponível), `Down` (sessão não estabelecida) e `Desconhecido` (sem evidência local do ExaBGP). Snapshots persistidos mais antigos que `GMJFLOW_BGP_SNAPSHOT_STALE_SECONDS` (padrão: três ciclos de checagem, mínimo de 90s — o hold time recomendado pelo BGP) deixam de ser exibidos como Established e passam a `Desconhecido`.
 
 Administradores podem acionar `POST /api/bgp/connectors/recover-sessions` pela tela de conectores. O backend chama `POST /bgp/recover` no Host Agent, que pode reiniciar exclusivamente `exabgp-gmj-flow.service` quando o diagnóstico manual indicar necessidade. A operação preserva banco, histórico, FIFOs e anúncios e grava auditoria em `bgp_admin_audit`.
 
