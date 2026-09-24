@@ -10,6 +10,7 @@ import posixpath
 import re
 import stat
 import subprocess
+import threading
 import time as time_module
 from datetime import datetime, time, timedelta, timezone, tzinfo
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -37,6 +38,29 @@ FLOWSPEC_MARKERS = (
     "afi 1 safi 133",
     "flow-v4",
 )
+# Canonical BGP FSM states observed in ExaBGP log lines. The local FSM log is
+# the primary source of truth for the session state; TCP sockets are only a
+# secondary diagnostic and never promote a session to Established.
+FSM_STATE_RE = re.compile(
+    r"\b(opensent|openconfirm|established|connect|active|idle)\b",
+    re.IGNORECASE,
+)
+FSM_TO_SESSION_STATE = {
+    "established": "established",
+    "openconfirm": "connecting",
+    "opensent": "connecting",
+    "connect": "connecting",
+    "active": "connecting",
+    "idle": "down",
+}
+LEGACY_BGP_STATE = {
+    "established": "established",
+    "connecting": "connecting",
+    "down": "down",
+    "unknown": "not_verified",
+}
+BGP_STATE_REGISTRY: dict[str, dict[str, object]] = {}
+BGP_STATE_REGISTRY_LOCK = threading.Lock()
 PEER_ALIAS_RE = re.compile(r"\b(?:peer|neighbor|neighbour)[-_ ]?\d+\b", re.IGNORECASE)
 EXPLICIT_LOG_TIMESTAMP_RE = re.compile(
     r"(?P<timestamp>\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:\s*(?:Z|UTC|[+-]\d{2}:?\d{0,2}))?)",
@@ -282,6 +306,8 @@ def exabgp_evidence(
     disconnected = None
     shutdown = None
     family = None
+    state_event = None
+    state_value = ""
     details: list[str] = []
     for event in parsed_events:
         lowered = str(event["message"]).lower()
@@ -300,6 +326,11 @@ def exabgp_evidence(
         if current and related and any(marker in lowered for marker in FLOWSPEC_MARKERS):
             family = event
             matched = True
+        if current and related and "not established" not in lowered:
+            fsm_match = FSM_STATE_RE.search(str(event["message"]))
+            if fsm_match and (state_event is None or event_after(event, state_event)):
+                state_event = event
+                state_value = fsm_match.group(1).lower()
         if matched:
             details.append(str(event["message"])[-500:])
 
@@ -320,12 +351,127 @@ def exabgp_evidence(
         "last_disconnect_at": timestamp_text(disconnected.get("timestamp") if disconnected else None),
         "last_shutdown_at": timestamp_text(shutdown.get("timestamp") if shutdown else None),
         "last_family_evidence_at": timestamp_text(family.get("timestamp") if family else None),
+        "last_state_value": state_value,
+        "last_state_event_at": timestamp_text(state_event.get("timestamp") if state_event else None),
         "source": source,
         "details": details[-20:],
         "peer_aliases": sorted(aliases),
         "current_invocation_id": current_invocation,
         "service_started_at": timestamp_text(service_started_at),
     }
+
+
+def derive_exabgp_peer_state(
+    evidence: dict[str, Any],
+    *,
+    service_active: bool | None,
+    tcp_established: bool | None = None,
+    tcp_query_ok: bool = False,
+) -> dict[str, Any]:
+    """Derive the BGP session state from ExaBGP's own FSM evidence.
+
+    The ExaBGP journal/log is the primary source of truth. A TCP socket is a
+    secondary diagnostic only: it can contradict an established claim when the
+    socket layer is queryable, but it never promotes the session to
+    ``established`` on its own.
+    """
+    source = str(evidence.get("source") or "exabgp")
+    fsm_value = str(evidence.get("last_state_value") or "").lower()
+    if service_active is False:
+        return {
+            "state": "down",
+            "source": "systemd",
+            "fsm_confirmed": False,
+            "reason": "exabgp_service_inactive",
+            "changed_at": "",
+        }
+    if evidence.get("connected_current"):
+        tcp_contradiction = bool(tcp_query_ok and tcp_established is False)
+        established_fsm = fsm_value in {"", "established"}
+        if tcp_contradiction and established_fsm:
+            # Log says connected but the peer socket is gone while TCP
+            # diagnostics are available: report unknown instead of keeping an
+            # Established state that no longer matches the socket layer.
+            return {
+                "state": "unknown",
+                "source": f"{source} + tcp",
+                "fsm_confirmed": True,
+                "reason": "tcp_missing_for_connected_peer",
+                "changed_at": str(evidence.get("last_connected_at") or ""),
+            }
+        return {
+            "state": "established",
+            "source": source,
+            "fsm_confirmed": True,
+            "reason": "",
+            "changed_at": str(evidence.get("last_connected_at") or ""),
+        }
+    if evidence.get("explicit_disconnect") or evidence.get("explicit_shutdown"):
+        disconnect_first = bool(evidence.get("explicit_disconnect"))
+        return {
+            "state": "down",
+            "source": source,
+            "fsm_confirmed": True,
+            "reason": "explicit_disconnect" if disconnect_first else "explicit_shutdown",
+            "changed_at": str(
+                evidence.get("last_disconnect_at")
+                if disconnect_first
+                else evidence.get("last_shutdown_at")
+            ),
+        }
+    if fsm_value in FSM_TO_SESSION_STATE:
+        mapped = FSM_TO_SESSION_STATE[fsm_value]
+        return {
+            "state": mapped,
+            "source": source,
+            "fsm_confirmed": True,
+            "reason": "" if mapped == "established" else f"fsm_{fsm_value}",
+            "changed_at": str(evidence.get("last_state_event_at") or ""),
+        }
+    return {
+        "state": "unknown",
+        "source": source,
+        "fsm_confirmed": False,
+        "reason": "no_current_fsm_evidence",
+        "changed_at": "",
+    }
+
+
+def update_bgp_state_registry(
+    peer_ip: str,
+    derivation: dict[str, Any],
+    observed_at: str,
+) -> dict[str, Any]:
+    """Track previous_state/changed_at/last_update per peer (local registry)."""
+    state = str(derivation.get("state") or "unknown")
+    changed_at = str(derivation.get("changed_at") or "")
+    with BGP_STATE_REGISTRY_LOCK:
+        entry = dict(BGP_STATE_REGISTRY.get(peer_ip) or {})
+        previous_state = str(entry.get("state") or "")
+        if previous_state and previous_state != state:
+            entry["previous_state"] = previous_state
+            if not changed_at:
+                changed_at = observed_at
+        changed_at = changed_at or str(entry.get("changed_at") or "") or observed_at
+        entry.update(
+            {
+                "state": state,
+                "changed_at": changed_at,
+                "last_update": observed_at,
+                "source": str(derivation.get("source") or ""),
+            }
+        )
+        BGP_STATE_REGISTRY[peer_ip] = entry
+        return dict(entry)
+
+
+def reset_bgp_state_registry() -> None:
+    with BGP_STATE_REGISTRY_LOCK:
+        BGP_STATE_REGISTRY.clear()
+
+
+def legacy_bgp_state(state: str) -> str:
+    return LEGACY_BGP_STATE.get(str(state or "").lower(), "not_verified")
 
 
 def validated_log_path(requested_path: str, configured_path: str) -> str:
@@ -1066,6 +1212,43 @@ def systemd_service_status(service: str) -> dict[str, Any]:
     }
 
 
+def systemd_service_details(service: str) -> dict[str, Any]:
+    """One `systemctl show` call for all status fields used by /bgp/status."""
+    code, output = run(
+        [
+            "systemctl",
+            "show",
+            service,
+            "--property=InvocationID",
+            "--property=ExecMainStartTimestamp",
+            "--property=ExecStart",
+            "--property=MainPID",
+            "--property=ActiveState",
+            "--property=SubState",
+            "--no-pager",
+        ]
+    )
+    values: dict[str, str] = {}
+    for line in output.splitlines():
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        values[key.strip()] = value.strip()
+    try:
+        main_pid = int(values.get("MainPID") or 0)
+    except ValueError:
+        main_pid = 0
+    return {
+        "query_ok": code == 0,
+        "invocation_id": values.get("InvocationID", ""),
+        "started_at": values.get("ExecMainStartTimestamp", ""),
+        "exec_start": values.get("ExecStart", ""),
+        "main_pid": main_pid or None,
+        "active_state": values.get("ActiveState", ""),
+        "sub_state": values.get("SubState", ""),
+    }
+
+
 def listener_status(listen_port: int) -> dict[str, Any]:
     code, output = run(["ss", "-lntp"])
     source = "ss"
@@ -1083,35 +1266,23 @@ def listener_status(listen_port: int) -> dict[str, Any]:
     }
 
 
-def bgp_status(
+def collect_bgp_service_context(
     service: str,
-    peer_ip: str,
-    listen_port: int,
-    pipe_path: str = "",
     log_path: str = "",
     configured_log_path: str = DEFAULT_EXABGP_LOG_PATH,
     config_path: str = "",
     configured_config_path: str = DEFAULT_EXABGP_CONFIG_PATH,
-    listener_required: bool = False,
-) -> dict[str, object]:
+    listen_port: int = 179,
+) -> dict[str, Any]:
+    """Collect service/listener/socket/log evidence once per request.
+
+    Multi-peer requests reuse this context so systemctl, ss and journalctl run
+    a single time per shared service instead of once per connector row.
+    """
     service = normalize_systemd_service_name(service)
     service_status = systemd_service_status(service)
-    invocation_code, invocation_output = (
-        run(["systemctl", "show", service, "--property=InvocationID", "--value"])
-    )
-    started_code, started_output = (
-        run(["systemctl", "show", service, "--property=ExecMainStartTimestamp", "--value"])
-    )
-    exec_start_code, exec_start_output = (
-        run(["systemctl", "show", service, "--property=ExecStart", "--value"])
-    )
+    details = systemd_service_details(service)
     listen_code, listen_output = run(["ss", "-lntp"])
-    session_ok, session_output, session_source = current_tcp_sockets()
-    log_code, log_output = (
-        run(["journalctl", "-u", service, "-n", "1000", "--no-pager", "-o", "json"], timeout=4.0)
-    )
-
-    service_active = bool(service_status["active"])
     listener_query_ok = listen_code == 0
     listener_source = "ss"
     if not listener_query_ok:
@@ -1120,19 +1291,74 @@ def bgp_status(
     listening = bool(
         listener_query_ok and tcp_listener_in_output(listen_output, listen_port)
     )
+    session_ok, session_output, session_source = current_tcp_sockets()
+    log_code, log_output = (
+        run(["journalctl", "-u", service, "-n", "1000", "--no-pager", "-o", "json"], timeout=4.0)
+    )
+    return {
+        "service": service,
+        "service_status": service_status,
+        "details": details,
+        "listener": {
+            "listening": listening,
+            "expected_port": listen_port,
+            "query_ok": listener_query_ok,
+            "query_source": listener_source,
+            "required": False,
+            "blocking": False,
+        },
+        "session_ok": session_ok,
+        "session_output": session_output,
+        "session_source": session_source,
+        "log_ok": log_code == 0,
+        "log_output": log_output if log_code == 0 else "",
+        "log_path": log_path,
+        "configured_log_path": configured_log_path,
+        "config_path": config_path,
+        "configured_config_path": configured_config_path,
+    }
+
+
+def analyze_exabgp_peer(
+    peer_ip: str,
+    context: dict[str, Any],
+    *,
+    listen_port: int = 179,
+    pipe_path: str = "",
+    listener_required: bool = False,
+) -> dict[str, Any]:
+    """Build the full per-peer status payload from a shared service context."""
+    service_status = dict(context["service_status"])
+    details = dict(context["details"])
+    service_active = bool(service_status["active"])
+    listening = bool(context["listener"]["listening"])
+    session_ok = bool(context["session_ok"])
+    session_output = str(context["session_output"] or "")
+    session_source = str(context["session_source"] or "")
+    log_output = str(context["log_output"] or "")
+    log_path = str(context.get("log_path") or "")
+    configured_log_path = str(
+        context.get("configured_log_path") or DEFAULT_EXABGP_LOG_PATH
+    )
+    config_path = str(context.get("config_path") or "")
+    configured_config_path = str(
+        context.get("configured_config_path") or DEFAULT_EXABGP_CONFIG_PATH
+    )
+    listened_port = int(listen_port or context["listener"]["expected_port"] or 179)
     socket_status = tcp_socket_diagnostics(
         session_output,
         [peer_ip],
-        listen_port,
+        listened_port,
         command_ok=session_ok,
     )
     tcp_established = peer_ip in socket_status["established_peers"]
-
-    current_invocation = invocation_output.strip() if invocation_code == 0 else ""
-    service_started_at = parse_timestamp(started_output) if started_code == 0 else None
-    evidence = exabgp_evidence(
-        log_output if log_code == 0 else "", peer_ip, current_invocation, service_started_at
+    current_invocation = str(details.get("invocation_id") or "")
+    service_started_at = (
+        parse_timestamp(str(details.get("started_at") or ""))
+        if details.get("query_ok")
+        else None
     )
+    evidence = exabgp_evidence(log_output, peer_ip, current_invocation, service_started_at)
     if not evidence["details"]:
         file_output, log_modified_at, log_error = read_log_file(log_path, configured_log_path)
         if not log_error:
@@ -1151,8 +1377,8 @@ def bgp_status(
         )
     log_evidence_source = str(evidence.get("source") or "exabgp_journal")
     current_config_paths = (
-        exabgp_config_paths_from_exec_start(exec_start_output)
-        if exec_start_code == 0
+        exabgp_config_paths_from_exec_start(str(details.get("exec_start") or ""))
+        if details.get("query_ok")
         else []
     )
     requested_config_path = normalized_exabgp_config_path(config_path)
@@ -1185,13 +1411,30 @@ def bgp_status(
     evidence["systemd_config_paths"] = current_config_paths
 
     pipe = fifo_status(pipe_path)
-    bgp_state = (
-        "established"
-        if tcp_established
-        else "down"
-        if session_ok and bool(peer_ip)
-        else "not_verified"
+    observed_at = timestamp_text(datetime.now(timezone.utc))
+    derivation = derive_exabgp_peer_state(
+        evidence,
+        service_active=service_active,
+        tcp_established=tcp_established,
+        tcp_query_ok=session_ok,
     )
+    registry = update_bgp_state_registry(peer_ip, derivation, observed_at)
+    state = str(derivation.get("state") or "unknown")
+    changed_at = str(registry.get("changed_at") or "")
+    uptime_seconds: int | None = None
+    if state == "established" and changed_at:
+        parsed_change = parse_timestamp(changed_at)
+        if parsed_change is not None:
+            uptime_seconds = max(
+                0, int((datetime.now(timezone.utc) - parsed_change).total_seconds())
+            )
+    evidence_age_seconds: int | None = None
+    if str(evidence.get("last_state_event_at") or ""):
+        parsed_evidence = parse_timestamp(str(evidence["last_state_event_at"]))
+        if parsed_evidence is not None:
+            evidence_age_seconds = max(
+                0, int((datetime.now(timezone.utc) - parsed_evidence).total_seconds())
+            )
     config_verified = bool(
         evidence["config_readable"]
         and evidence["config_parse_valid"]
@@ -1204,12 +1447,14 @@ def bgp_status(
     )
     if not config_verified:
         flowspec_state = "not_verified"
+        flowspec_channel_state = "unknown"
     else:
         flowspec_state = "established" if flowspec_ok else "down"
+        flowspec_channel_state = "available" if flowspec_ok else "down"
     checks = {
         "service_ok": service_active,
         "listener_ok": listening,
-        "bgp_ok": tcp_established,
+        "bgp_ok": state == "established",
         "flowspec_ok": flowspec_ok,
         "pipe_ok": bool(pipe["ok"]),
         "close_wait_ok": not bool(socket_status["close_wait_alert"]),
@@ -1222,15 +1467,43 @@ def bgp_status(
         and checks["pipe_ok"]
         and checks["close_wait_ok"]
     )
-
+    process_state = (
+        "running"
+        if service_active
+        else "stopped"
+        if details.get("query_ok")
+        and str(details.get("active_state")) in {"inactive", "failed"}
+        else "unknown"
+    )
     return {
         "available": True,
+        "peer_ip": peer_ip,
+        "state": state,
+        "bgp_state": legacy_bgp_state(state),
+        "previous_state": str(registry.get("previous_state") or ""),
+        "changed_at": changed_at,
+        "last_update": str(registry.get("last_update") or observed_at),
+        "source": str(derivation.get("source") or ""),
+        "fsm_confirmed": bool(derivation.get("fsm_confirmed")),
+        "state_reason": str(derivation.get("reason") or ""),
+        "uptime_seconds": uptime_seconds,
+        "evidence_age_seconds": evidence_age_seconds,
+        "observed_at": observed_at,
         "service": service_status,
+        "process": {
+            "query_ok": bool(details.get("query_ok")),
+            "main_pid": details.get("main_pid"),
+            "invocation_id": current_invocation,
+            "started_at": str(details.get("started_at") or ""),
+            "active_state": str(details.get("active_state") or ""),
+            "sub_state": str(details.get("sub_state") or ""),
+            "state": process_state,
+        },
         "listener": {
             "listening": listening,
-            "expected_port": listen_port,
-            "query_ok": listener_query_ok,
-            "query_source": listener_source,
+            "expected_port": listened_port,
+            "query_ok": bool(context["listener"]["query_ok"]),
+            "query_source": str(context["listener"]["query_source"]),
             "required": bool(listener_required),
             "blocking": False,
         },
@@ -1240,7 +1513,23 @@ def bgp_status(
             "query_source": session_source,
             **socket_status,
         },
-        "bgp_state": bgp_state,
+        "flowspec": {
+            "state": flowspec_channel_state,
+            "source": (
+                "exabgp_config"
+                if evidence.get("config_readable") or config_error
+                else "none"
+            ),
+            "configured": flowspec_ok,
+            "detail": {
+                "config_readable": bool(evidence.get("config_readable")),
+                "config_parse_valid": bool(evidence.get("config_parse_valid")),
+                "neighbor_found": bool(evidence.get("neighbor_found")),
+                "family_block_found": bool(evidence.get("family_block_found")),
+                "ipv4_flow_configured": bool(evidence.get("ipv4_flow_configured")),
+                "config_error": str(evidence.get("config_error") or ""),
+            },
+        },
         "flowspec_state": flowspec_state,
         "transport_ready": transport_ready,
         "listener_required": bool(listener_required),
@@ -1256,6 +1545,81 @@ def bgp_status(
         "pipes": pipe,
         "evidence": evidence,
     }
+
+
+def bgp_status_multi(
+    service: str,
+    peer_ips: list[str],
+    listen_port: int,
+    pipe_path: str = "",
+    log_path: str = "",
+    configured_log_path: str = DEFAULT_EXABGP_LOG_PATH,
+    config_path: str = "",
+    configured_config_path: str = DEFAULT_EXABGP_CONFIG_PATH,
+    listener_required: bool = False,
+) -> dict[str, object]:
+    """Status for every requested peer sharing one service context.
+
+    The service/listener/socket/log evidence is collected exactly once; each
+    peer only adds its own FSM/config/FIFO analysis.
+    """
+    peers = [
+        str(peer or "").strip()
+        for peer in peer_ips
+        if str(peer or "").strip()
+    ]
+    context = collect_bgp_service_context(
+        service,
+        log_path,
+        configured_log_path,
+        config_path,
+        configured_config_path,
+        listen_port,
+    )
+    context["listener"]["required"] = bool(listener_required)
+    peers_payload: dict[str, dict[str, Any]] = {}
+    for peer in peers:
+        peers_payload[peer] = analyze_exabgp_peer(
+            peer,
+            context,
+            listen_port=listen_port,
+            pipe_path=pipe_path,
+            listener_required=listener_required,
+        )
+    result: dict[str, object] = {
+        "available": True,
+        "peers": peers_payload,
+        "observed_at": timestamp_text(datetime.now(timezone.utc)),
+    }
+    if peers_payload:
+        result.update(next(iter(peers_payload.values())))
+        result["peers"] = peers_payload
+    return result
+
+
+def bgp_status(
+    service: str,
+    peer_ip: str,
+    listen_port: int,
+    pipe_path: str = "",
+    log_path: str = "",
+    configured_log_path: str = DEFAULT_EXABGP_LOG_PATH,
+    config_path: str = "",
+    configured_config_path: str = DEFAULT_EXABGP_CONFIG_PATH,
+    listener_required: bool = False,
+) -> dict[str, object]:
+    """Single-peer compatibility wrapper around bgp_status_multi."""
+    return bgp_status_multi(
+        service,
+        [peer_ip],
+        listen_port,
+        pipe_path,
+        log_path,
+        configured_log_path,
+        config_path,
+        configured_config_path,
+        listener_required,
+    )
 
 
 def configured_token() -> str:
@@ -1472,6 +1836,13 @@ class Handler(BaseHTTPRequestHandler):
         params = parse_qs(parsed.query)
         service = params.get("service", [""])[0]
         peer_ip = params.get("peer_ip", [""])[0]
+        requested_peers = [
+            peer.strip()
+            for peer in params.get("peer_ips", [""])[0].split(",")
+            if peer.strip()
+        ]
+        if not requested_peers:
+            requested_peers = [peer_ip]
         pipe_path = params.get("pipe_path", [""])[0]
         log_path = params.get("log_path", [self.configured_log_path])[0]
         config_path = params.get("config_path", [self.configured_config_path])[0]
@@ -1484,9 +1855,9 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             listen_port = 179
         try:
-            payload = bgp_status(
+            payload = bgp_status_multi(
                 service,
-                peer_ip,
+                requested_peers,
                 listen_port,
                 pipe_path,
                 log_path,
