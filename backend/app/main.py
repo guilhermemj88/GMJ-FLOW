@@ -38316,6 +38316,71 @@ def list_automatic_mitigation_executions(
     return {"items": items, "count": len(items), "summary": summary}
 
 
+@app.get("/api/mitigation/automation/health")
+def mitigation_automation_health(request: Request):
+    """Saúde da automação: orquestrador, contagens por status e últimas falhas.
+
+    Usado pela tela de Mitigação (seção "Saúde da automação"). Não altera estado:
+    apenas agrega o orquestrador de mitigação automática e o histórico de execuções.
+    """
+    require_admin(request)
+    ensure_sensor_db()
+    orchestrator = automatic_mitigation_orchestrator()
+    executions = orchestrator.list_executions(limit=1000)
+    counts = {
+        key: 0
+        for key in (
+            "generated",
+            "queued",
+            "applying",
+            "active",
+            "failed",
+            "withdraw_pending",
+            "withdrawn",
+            "expired",
+            "blocked",
+            "cancelled",
+        )
+    }
+    last_execution_at = ""
+    recent_failures: list[dict[str, Any]] = []
+    for item in executions:
+        status_key = clean_text(item.get("status"))
+        if status_key in counts:
+            counts[status_key] += 1
+        updated_at = clean_text(item.get("updated_at") or item.get("created_at"))
+        if updated_at > last_execution_at:
+            last_execution_at = updated_at
+        if status_key == "failed" and len(recent_failures) < 5:
+            recent_failures.append(
+                {
+                    "id": item.get("id"),
+                    "anomaly_id": item.get("anomaly_id"),
+                    "vector": clean_text(item.get("vector")),
+                    "connector_id": item.get("connector_id"),
+                    "error": clean_text(item.get("error_message") or item.get("error_code") or item.get("policy_reason")),
+                    "at": updated_at,
+                }
+            )
+    last_job_at = ""
+    with sqlite_connection() as conn:
+        if sqlite_table_exists(conn, "automatic_mitigation_jobs"):
+            row = conn.execute("SELECT MAX(updated_at) AS last_job_at FROM automatic_mitigation_jobs").fetchone()
+            last_job_at = clean_text(row["last_job_at"] if row else "")
+    thread = AUTOMATIC_MITIGATION_THREAD
+    return {
+        "orchestrator": {
+            "worker_enabled": automatic_mitigation_worker_enabled(),
+            "thread_alive": bool(thread is not None and thread.is_alive()),
+            "interval_seconds": max(1, int(os.getenv("GMJFLOW_AUTO_MITIGATION_INTERVAL_SECONDS", "5"))),
+            "last_job_at": last_job_at,
+            "last_execution_at": last_execution_at,
+        },
+        "executions": {"total": len(executions), **counts},
+        "recent_failures": recent_failures,
+    }
+
+
 @app.post("/api/anomalies/{event_id}/mitigation/apply", status_code=201)
 def apply_anomaly_mitigation(request: Request, event_id: int, payload: BgpAnomalyMitigationApplyPayload):
     require_admin(request)
