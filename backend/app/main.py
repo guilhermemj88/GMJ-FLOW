@@ -1082,6 +1082,12 @@ UDP_UPLOAD_EXCLUDED_SRC_PORTS_DEFAULT: set[int] = set()
 UDP_DOWNLOAD_EXCLUDED_DST_PORTS_DEFAULT = {443, 500, 4500, 3478, 19302}
 UDP_REFLECTION_SRC_PORTS_DEFAULT = {53, 123, 389, 1900, 11211, 19, 161, 520}
 
+# Minimo de origens distintas observadas para classificar a forma do trafego
+# como `multi-source` (mesma regra de `attack_shape_from_samples`). A
+# cardinalidade CLASSIFICA a distribuicao; nos detectores inbound ela nunca
+# participa do HAVING/trigger.
+DISTRIBUTION_SEMANTIC_MULTI_SOURCE_MIN = 3
+
 AI_MODEL_PROFILES = {
     "economical": {
         "profile_id": "economical",
@@ -29211,22 +29217,71 @@ def ip_zone_flow_coverage(
                 detail=f"Falha ao consultar cobertura de flow no ClickHouse: {exc}",
             ) from exc
 
-    summary_rows = coverage_query(
+    # COVERAGE-PERF-01: uma unica passada substitui summary + as 3 consultas de
+    # top_input_output (eram 4 varreduras independentes sobre a mesma janela).
+    # Os totais globais (antigo `summary`) sao a soma das colunas `sumIf` de TODOS
+    # os grupos — exato enquanto nenhum grupo for truncado pelo LIMIT (medido:
+    # 486 grupos distintos de `(input_if, output_if)` na janela de referencia).
+    if_group_limit = 1000
+    group_rows = coverage_query(
         f"""
         SELECT
+            input_if,
+            output_if,
+            sum({auto_row_bytes_expr}) AS general_bytes,
+            sum({auto_row_packets_expr}) AS general_packets,
+            sum(flow_count) AS general_flows,
+            sumIf({src_row_bytes_expr}, {src_filter}) AS src_bytes,
+            sumIf({src_row_packets_expr}, {src_filter}) AS src_packets,
+            sumIf(flow_count, {src_filter}) AS src_flows,
+            sumIf({dst_row_bytes_expr}, {dst_filter}) AS dst_bytes,
+            sumIf({dst_row_packets_expr}, {dst_filter}) AS dst_packets,
+            sumIf(flow_count, {dst_filter}) AS dst_flows,
             sumIf({src_row_bytes_expr}, {src_filter}) AS bytes_src_in_zone,
             sumIf({dst_row_bytes_expr}, {dst_filter}) AS bytes_dst_in_zone,
             sumIf({src_row_packets_expr}, {src_filter}) AS packets_src_in_zone,
             sumIf({dst_row_packets_expr}, {dst_filter}) AS packets_dst_in_zone,
             sumIf(flow_count, {src_filter}) AS total_flows_src_in_zone,
-            sumIf(flow_count, {dst_filter}) AS total_flows_dst_in_zone,
-            sumIf({src_row_bytes_expr}, {src_filter}) * 8 / {{seconds:Float64}} AS total_bps_src_in_zone,
-            sumIf({dst_row_bytes_expr}, {dst_filter}) * 8 / {{seconds:Float64}} AS total_bps_dst_in_zone
+            sumIf(flow_count, {dst_filter}) AS total_flows_dst_in_zone
         FROM flow_raw
         WHERE {base_where}
+        GROUP BY input_if, output_if
+        ORDER BY general_bytes DESC
+        LIMIT {int(if_group_limit)}
         """
     )
-    summary = summary_rows[0] if summary_rows else {}
+    if len(group_rows) >= if_group_limit:
+        # Truncado: os totais nao podem ser derivados dos grupos — usa o caminho
+        # dedicado (mesma consulta do formato anterior) para preservar o summary.
+        summary_rows = coverage_query(
+            f"""
+            SELECT
+                sumIf({src_row_bytes_expr}, {src_filter}) AS bytes_src_in_zone,
+                sumIf({dst_row_bytes_expr}, {dst_filter}) AS bytes_dst_in_zone,
+                sumIf({src_row_packets_expr}, {src_filter}) AS packets_src_in_zone,
+                sumIf({dst_row_packets_expr}, {dst_filter}) AS packets_dst_in_zone,
+                sumIf(flow_count, {src_filter}) AS total_flows_src_in_zone,
+                sumIf(flow_count, {dst_filter}) AS total_flows_dst_in_zone,
+                sumIf({src_row_bytes_expr}, {src_filter}) * 8 / {{seconds:Float64}} AS total_bps_src_in_zone,
+                sumIf({dst_row_bytes_expr}, {dst_filter}) * 8 / {{seconds:Float64}} AS total_bps_dst_in_zone
+            FROM flow_raw
+            WHERE {base_where}
+            """
+        )
+        summary = summary_rows[0] if summary_rows else {}
+    else:
+        total_bytes_src = sum(float(row.get("bytes_src_in_zone") or 0) for row in group_rows)
+        total_bytes_dst = sum(float(row.get("bytes_dst_in_zone") or 0) for row in group_rows)
+        summary = {
+            "bytes_src_in_zone": total_bytes_src,
+            "bytes_dst_in_zone": total_bytes_dst,
+            "packets_src_in_zone": sum(float(row.get("packets_src_in_zone") or 0) for row in group_rows),
+            "packets_dst_in_zone": sum(float(row.get("packets_dst_in_zone") or 0) for row in group_rows),
+            "total_flows_src_in_zone": sum(int(row.get("total_flows_src_in_zone") or 0) for row in group_rows),
+            "total_flows_dst_in_zone": sum(int(row.get("total_flows_dst_in_zone") or 0) for row in group_rows),
+            "total_bps_src_in_zone": total_bytes_src * 8 / seconds,
+            "total_bps_dst_in_zone": total_bytes_dst * 8 / seconds,
+        }
 
     def numeric_row_items(result_rows: list[dict[str, Any]], include_ip: bool = False) -> list[dict[str, Any]]:
         items = []
@@ -29245,24 +29300,34 @@ def ip_zone_flow_coverage(
             items.append(item)
         return items
 
-    def top_input_output(where_filter: str, row_bytes_expr: str, row_packets_expr: str) -> list[dict[str, Any]]:
-        rows = coverage_query(
-            f"""
-            SELECT
-                input_if,
-                output_if,
-                sum({row_bytes_expr}) AS total_bytes,
-                sum({row_packets_expr}) AS total_packets,
-                sum(flow_count) AS flows,
-                sum({row_bytes_expr}) * 8 / {{seconds:Float64}} AS bps
-            FROM flow_raw
-            WHERE {base_where} AND {where_filter}
-            GROUP BY input_if, output_if
-            ORDER BY bps DESC
-            LIMIT 10
-            """
-        )
-        return numeric_row_items(rows)
+    def top_input_output_from_groups(
+        bytes_key: str,
+        packets_key: str,
+        flows_key: str,
+    ) -> list[dict[str, Any]]:
+        """Top 10 por interface a partir do UMA passada (mesma ordenacao/limite)."""
+        ordered = sorted(
+            group_rows,
+            key=lambda row: (
+                float(row.get(bytes_key) or 0) * 8 / seconds,
+                float(row.get(packets_key) or 0),
+                float(row.get(flows_key) or 0),
+            ),
+            reverse=True,
+        )[:10]
+        items = []
+        for row in ordered:
+            items.append(
+                {
+                    "bps": round(float(row.get(bytes_key) or 0) * 8 / seconds, 2),
+                    "bytes": int(float(row.get(bytes_key) or 0)),
+                    "packets": int(float(row.get(packets_key) or 0)),
+                    "flows": int(row.get(flows_key) or 0),
+                    "input_if": int(row.get("input_if") or 0),
+                    "output_if": int(row.get("output_if") or 0),
+                }
+            )
+        return items
 
     def top_ips(column: str, where_filter: str, row_bytes_expr: str, row_packets_expr: str) -> list[dict[str, Any]]:
         rows = coverage_query(
@@ -29316,9 +29381,9 @@ def ip_zone_flow_coverage(
         "total_packets_dst_in_zone": int(float(summary.get("packets_dst_in_zone") or 0)),
         "total_flows_src_in_zone": int(summary.get("total_flows_src_in_zone") or 0),
         "total_flows_dst_in_zone": int(summary.get("total_flows_dst_in_zone") or 0),
-        "top_input_output_general": top_input_output("1 = 1", auto_row_bytes_expr, auto_row_packets_expr),
-        "top_input_output_when_src_in_zone": top_input_output(src_filter, src_row_bytes_expr, src_row_packets_expr),
-        "top_input_output_when_dst_in_zone": top_input_output(dst_filter, dst_row_bytes_expr, dst_row_packets_expr),
+        "top_input_output_general": top_input_output_from_groups("general_bytes", "general_packets", "general_flows"),
+        "top_input_output_when_src_in_zone": top_input_output_from_groups("src_bytes", "src_packets", "src_flows"),
+        "top_input_output_when_dst_in_zone": top_input_output_from_groups("dst_bytes", "dst_packets", "dst_flows"),
         "top_src_ips_in_zone": top_ips("src_ip", src_filter, src_row_bytes_expr, src_row_packets_expr),
         "top_dst_ips_in_zone": top_ips("dst_ip", dst_filter, dst_row_bytes_expr, dst_row_packets_expr),
         "warnings": warnings,
@@ -33383,6 +33448,40 @@ def learn_flow_samples(
     return [compact_flow_row(row) for row in rows]
 
 
+def attack_shape_from_counts(
+    unique_src_ips: int,
+    unique_dst_ips: int,
+    unique_dst_ports: int,
+    top_share: float = 0.0,
+    top_src_port: int = 0,
+    exact_cardinality: bool = False,
+) -> str:
+    """Regra canonica da forma do trafego (`attack_shape`).
+
+    Extraida de `attack_shape_from_samples` para poder ser aplicada tambem as
+    contagens exatas do agregado do detector (`uniqExact`), sem duplicar a
+    regra e sem depender de amostra. Mesma semantica: uma origem dominante =
+    `single-source`; >= 3 origens concentradas em <= 2 destinos e <= 2 portas
+    = `multi-source`.
+    """
+    # `exact_cardinality=True` quando as contagens vem do proprio agregado
+    # (uniqExact): uma unica origem distinta e um FATO, nao uma inferencia da
+    # amostra — nao depende da concentracao medida para ser classificada.
+    if int(unique_src_ips or 0) == 1 and (exact_cardinality or float(top_share or 0) >= 0.5):
+        return "single-source"
+    if (
+        int(unique_src_ips or 0) >= DISTRIBUTION_SEMANTIC_MULTI_SOURCE_MIN
+        and int(unique_dst_ips or 0) <= 2
+        and int(unique_dst_ports or 0) <= 2
+    ):
+        return "multi-source"
+    if int(top_src_port or 0) in UDP_REFLECTION_SRC_PORTS_DEFAULT:
+        return "reflection"
+    if int(unique_dst_ports or 0) >= 5:
+        return "scan"
+    return "volumetric"
+
+
 def attack_shape_from_samples(samples: list[dict[str, Any]]) -> str:
     if not samples:
         return "volumetric"
@@ -33392,15 +33491,256 @@ def attack_shape_from_samples(samples: list[dict[str, Any]]) -> str:
     top = samples[0]
     total_packets = sum(int(item.get("packets") or 0) for item in samples)
     top_share = int(top.get("packets") or 0) / total_packets if total_packets else 0
-    if len(src_ips) == 1 and top_share >= 0.5:
-        return "single-source"
-    if len(src_ips) >= 3 and len(dst_ips) <= 2 and len(dst_ports) <= 2:
-        return "multi-source"
-    if int(top.get("src_port") or 0) in UDP_REFLECTION_SRC_PORTS_DEFAULT:
-        return "reflection"
-    if len(dst_ports) >= 5:
-        return "scan"
-    return "volumetric"
+    return attack_shape_from_counts(
+        len(src_ips),
+        len(dst_ips),
+        len(dst_ports),
+        top_share,
+        int(top.get("src_port") or 0),
+    )
+
+
+def event_sampling_observation(
+    conn: sqlite3.Connection,
+    vector: dict[str, Any],
+    traffic: dict[str, Any],
+) -> dict[str, Any]:
+    """Observacao de amostragem do evento (somente leitura).
+
+    PPS e corrigido pelo sample-rate; a cardinalidade e contagem de ORIGENS
+    DISTINTAS OBSERVADAS NA AMOSTRA e nao deve ser multiplicada pelo
+    sample-rate nem apresentada como total real de origens.
+    """
+    direction = "output" if clean_text(vector.get("direction")).lower() == "sends" else "input"
+    if_index = traffic.get("output_if") if direction == "output" else traffic.get("input_if")
+    if if_index is None:
+        if_index = traffic.get("output_if") if traffic.get("output_if") is not None else traffic.get("input_if")
+    sensor_name = clean_text(traffic.get("sensor"))
+    sensor_id: int | None = None
+    if sensor_name:
+        try:
+            row = conn.execute(
+                """
+                SELECT id FROM sensors
+                WHERE name = ? OR exporter_ip = ?
+                ORDER BY active DESC, id
+                LIMIT 1
+                """,
+                (sensor_name, sensor_name),
+            ).fetchone()
+            sensor_id = int(row["id"]) if row is not None else None
+        except (sqlite3.Error, TypeError, ValueError):
+            sensor_id = None
+    sample_rate: int | None = None
+    if sensor_id is not None:
+        try:
+            sample_rate = get_effective_sample_rate(
+                sensor_id,
+                int(if_index) if if_index else None,
+                direction,
+                1,
+            )
+        except (sqlite3.Error, ValueError):
+            sample_rate = None
+    return {
+        "sensor": sensor_name,
+        "sensor_id": sensor_id,
+        "if_index": int(if_index) if if_index else None,
+        "direction": direction,
+        "sample_rate": sample_rate,
+        "available": sample_rate is not None,
+        "cardinality_is_sampled": True,
+        "note": "origens distintas observadas na amostra; nao e o total real de origens",
+    }
+
+
+def distribution_evidence_for_event(
+    conn: sqlite3.Connection,
+    vector: dict[str, Any],
+    traffic: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Estrategia C: forma do trafego como EVIDENCIA, nunca como gate.
+
+    Vale para os vetores cujo agregado devolve cardinalidade (`unique_src_ips`).
+    Nos detectores inbound a cardinalidade nao participa do HAVING; no vetor de
+    upload many-clients ela E condicao do detector, e isso fica explicito em
+    `used_for_trigger`.
+    """
+    if traffic.get("unique_src_ips") is None:
+        return None
+    unique_src_ips = int(traffic.get("unique_src_ips") or 0)
+    unique_dst_ips = int(traffic.get("unique_dst_ips") or 0)
+    unique_dst_ports = int(traffic.get("unique_dst_ports") or 0)
+    total_packets = int(traffic.get("total_packets") or 0)
+    top_packets = int(traffic.get("top_packets") or 0)
+    top_share = (top_packets / total_packets) if total_packets > 0 else 0.0
+    used_for_trigger = udp_vector_name(vector) in UDP_UPLOAD_MANY_CLIENTS_ALIASES
+    return {
+        "unique_src_ips_observed": unique_src_ips,
+        "unique_dst_ips_observed": unique_dst_ips,
+        "unique_dst_ports_observed": unique_dst_ports,
+        "attack_shape": attack_shape_from_counts(
+            unique_src_ips,
+            unique_dst_ips,
+            unique_dst_ports,
+            top_share,
+            int(traffic.get("top_src_port") or 0),
+            exact_cardinality=True,
+        ),
+        "classification_rule": "attack_shape_from_counts",
+        "semantic_threshold": DISTRIBUTION_SEMANTIC_MULTI_SOURCE_MIN,
+        "threshold_role": "classification_only",
+        "used_for_trigger": used_for_trigger,
+        "cardinality_source": "uniqExact(toString(src_ip)) do agregado do detector",
+        "sampling": event_sampling_observation(conn, vector, traffic),
+        "note": (
+            "A cardinalidade classifica a distribuicao do trafego e participa do HAVING deste detector."
+            if used_for_trigger
+            else "A cardinalidade classifica a distribuicao do trafego e nao foi usada como condicao para disparar este detector."
+        ),
+    }
+
+
+def legacy_trigger_conditions(vector: dict[str, Any], traffic: dict[str, Any]) -> list[dict[str, Any]]:
+    """Condicoes ADICIONAIS que realmente participaram do HAVING."""
+    if udp_vector_name(vector) not in UDP_UPLOAD_MANY_CLIENTS_ALIASES:
+        return []
+    threshold = traffic.get("unique_src_ips_threshold")
+    if threshold is None:
+        return []
+    observed_unique = int(traffic.get("unique_src_ips") or 0)
+    threshold = int(threshold)
+    return [
+        {
+            "condition": "unique_src_ips",
+            "metric": "unique_src_ips",
+            "comparison": ">=",
+            "expected": f">= {threshold}",
+            "threshold": threshold,
+            "actual": observed_unique,
+            "observed_value": observed_unique,
+            "passed": observed_unique >= threshold,
+        }
+    ]
+
+
+def legacy_detection_evidence(
+    vector: dict[str, Any],
+    traffic: dict[str, Any],
+    observed: float,
+    severity: str,
+) -> dict[str, Any]:
+    """Bloco `detection` do caminho legacy com o trigger REAL do detector.
+
+    Montado com as mesmas chaves do caminho de detection templates, mas SEM os
+    campos de elegibilidade de mitigacao automatica (`automatic_mitigation_threshold`,
+    `current`, `temporal_evidence`): esta tarefa nao pode alterar mitigacao.
+    """
+    threshold = float(traffic.get("threshold_value") or vector.get("threshold_value") or 0)
+    metric = vector.get("threshold_unit") or "packets_s"
+    comparison = clean_text(vector.get("comparison") or "over").lower()
+    triggered_severity = clean_text(severity or vector.get("severity") or "warning").lower()
+    triggered_at = clean_text(
+        traffic.get("first_seen_at") or traffic.get("last_seen_at") or utc_now_iso()
+    )
+    passed = bool(
+        threshold > 0
+        and (
+            observed >= threshold
+            if comparison in {"over", "gt", "gte", ">", ">="}
+            else observed <= threshold
+        )
+    )
+    return {
+        "trigger_condition": {
+            "metric": canonical_detection_unit(metric),
+            "comparison": comparison,
+            "observed_value": observed,
+            "threshold": threshold,
+            "passed": passed,
+        },
+        "trigger_value": observed,
+        "trigger_threshold": threshold,
+        "effective_threshold_at_detection": threshold,
+        "warning_threshold": threshold,
+        "critical_threshold": None,
+        "canonical_unit": canonical_detection_unit(metric),
+        "comparison": comparison,
+        "triggered_severity": triggered_severity,
+        "triggered_at": triggered_at,
+        "threshold_source": "attack_vectors.threshold_value",
+        "conditions_passed": legacy_trigger_conditions(vector, traffic),
+    }
+
+
+def legacy_enriched_source_details(
+    conn: sqlite3.Connection,
+    vector: dict[str, Any],
+    traffic: dict[str, Any],
+    observed: float,
+    severity: str,
+) -> dict[str, Any]:
+    """`source_details_json` do evento legacy, no formato do caminho de templates."""
+    details = dict(anomaly_source_from_vector(vector)["source_details_json"])
+    detection = legacy_detection_evidence(vector, traffic, observed, severity)
+    details["detection"] = detection
+    details.update(
+        {
+            "trigger_condition": detection["trigger_condition"],
+            "trigger_value": detection["trigger_value"],
+            "trigger_threshold": detection["trigger_threshold"],
+            "effective_threshold_at_detection": detection["effective_threshold_at_detection"],
+            "warning_threshold": detection["warning_threshold"],
+            "critical_threshold": detection["critical_threshold"],
+            "canonical_unit": detection["canonical_unit"],
+            "triggered_severity": detection["triggered_severity"],
+            "triggered_at": detection["triggered_at"],
+            "threshold_source": detection["threshold_source"],
+            "conditions_passed": detection["conditions_passed"],
+            "metric": vector.get("threshold_unit") or "packets_s",
+            "observed_metric": observed,
+        }
+    )
+    distribution = distribution_evidence_for_event(conn, vector, traffic)
+    if distribution is not None:
+        details["distribution_evidence"] = distribution
+        details["attack_shape"] = distribution.get("attack_shape") or ""
+    return details
+
+
+def refresh_legacy_distribution_evidence(
+    conn: sqlite3.Connection,
+    event_id: int,
+    row: sqlite3.Row | dict[str, Any] | None,
+    fresh: dict[str, Any],
+) -> None:
+    """Atualiza APENAS a evidencia de distribuicao de um evento ja existente.
+
+    O trigger permanece imutavel (o snapshot do primeiro disparo nao e
+    reescrito); a distribuicao e evidencia viva e acompanha a janela mais
+    recente. Nao toca severity, mitigation_basis/reason, thresholds nem
+    qualquer coluna usada por policy/mitigacao.
+    """
+    evidence = fresh.get("distribution_evidence")
+    if not evidence:
+        return
+    raw = None
+    if row is not None:
+        try:
+            raw = row["source_details_json"]
+        except (KeyError, IndexError, TypeError):
+            raw = None
+    current = bgp_json_loads(raw, {})
+    if not isinstance(current, dict):
+        current = {}
+    if current.get("distribution_evidence") == evidence:
+        return
+    current["distribution_evidence"] = evidence
+    current["attack_shape"] = evidence.get("attack_shape") or current.get("attack_shape") or ""
+    conn.execute(
+        "UPDATE anomaly_events SET source_details_json = ? WHERE id = ?",
+        (json.dumps(current, sort_keys=True, default=str), int(event_id)),
+    )
 
 
 def learn_sensor_targets(payload: AttackVectorLearnPayload) -> list[dict[str, Any]]:
@@ -34192,6 +34532,7 @@ def query_udp_many_internal_to_same_dst_port(
             unique_src_ips = int(row.get("unique_src_ips") or 0)
             severity = "critical" if packets_s >= critical_pps and unique_src_ips >= critical_unique else "warning"
             threshold = critical_pps if severity == "critical" else warning_pps
+            unique_src_ips_threshold = critical_unique if severity == "critical" else warning_unique
             target_ip = clean_ip(row.get("target_ip"))
             items.append(
                 {
@@ -34214,6 +34555,7 @@ def query_udp_many_internal_to_same_dst_port(
                     "estimated_bytes": int(row.get("total_bytes") or 0),
                     "estimated_packets": int(row.get("total_packets") or 0),
                     "unique_src_ips": unique_src_ips,
+                    "unique_src_ips_threshold": unique_src_ips_threshold,
                     "unique_dst_ips": int(row.get("unique_dst_ips") or 0),
                     "unique_dst_ports": int(row.get("unique_dst_ports") or 0),
                     "first_seen_at": row.get("first_seen_at"),
@@ -34912,6 +35254,8 @@ def upsert_anomaly_event(
     estimated_packets = int(traffic.get("total_packets") or traffic.get("estimated_packets") or 0)
     flow_count = int(traffic.get("flow_count") or 0)
     source_info = anomaly_source_from_vector(vector)
+    # Estrategia C: trigger real de PPS + evidencia de distribuicao (classificacao).
+    legacy_details = legacy_enriched_source_details(conn, vector, traffic, observed, severity)
     if row is None:
         started_at = now
         summary = anomaly_summary(vector, target_ip, observed, threshold, started_at)
@@ -34964,7 +35308,7 @@ def upsert_anomaly_event(
                 "source_engine": source_info["source_engine"],
                 "source_id": source_info["source_id"],
                 "source_name": source_info["source_name"],
-                "source_details_json": json.dumps(source_info["source_details_json"], sort_keys=True, default=str),
+                "source_details_json": json.dumps(legacy_details, sort_keys=True, default=str),
                 "created_at": now,
                 "updated_at": now,
             },
@@ -35059,6 +35403,7 @@ def upsert_anomaly_event(
             ),
         )
         action = "updated"
+        refresh_legacy_distribution_evidence(conn, event_id, row, legacy_details)
         logger.info(
             "Anomalia atualizada event_id=%s vetor=%s decoder=%s observed_value=%.6f threshold=%.6f",
             event_id,
@@ -42129,11 +42474,22 @@ def resolve_pending_asns(
 
 
 @app.get("/api/sensors")
-def list_sensors():
+def list_sensors(include_interfaces: bool = Query(True)):
+    """Lista de sensores.
+
+    `include_interfaces=false` devolve o modo LEVE (sem o fan-out de
+    enriquecimento por interface) — usado pela preview V2. O default preserva
+    o contrato antigo (`sensor.interfaces` inline), que tem consumidor real em
+    producao.
+    """
     ensure_sensor_db()
     with sqlite_connection() as conn:
         rows = conn.execute("SELECT * FROM sensors ORDER BY name, id").fetchall()
-        return {"items": [sensor_row_to_dict(conn, row) for row in rows]}
+        items = [
+            sensor_row_to_dict(conn, row, include_interfaces=bool(include_interfaces))
+            for row in rows
+        ]
+    return {"items": items, "include_interfaces": bool(include_interfaces)}
 
 
 def refresh_sensor_runtime_status() -> None:
@@ -42273,25 +42629,267 @@ def get_sensor(sensor_id: int):
 
 
 @app.get("/api/sensors/{sensor_id}/interfaces")
-def list_sensor_interfaces(sensor_id: int):
+def list_sensor_interfaces(
+    sensor_id: int,
+    monitor: str = Query("enabled"),
+    q: str = Query(""),
+    limit: int = Query(0, ge=0, le=5000),
+    offset: int = Query(0, ge=0),
+):
+    """Interfaces de um sensor.
+
+    Default `monitor=enabled` preserva o contrato atual. `monitor=all` inclui as
+    cadastradas nao monitoradas; `q` busca em if_name/if_alias/if_descr;
+    `limit`/`offset` adicionam paginacao opt-in (0 = sem paginacao).
+    """
     ensure_sensor_db()
     with sqlite_connection() as conn:
         _ = fetch_sensor_without_interfaces(conn, sensor_id)
-        rows = conn.execute(
-            """
-            SELECT *
-            FROM sensor_interfaces
-            WHERE sensor_id = ? AND monitor_enabled = 1
-            ORDER BY if_index, id
-            """,
-            (sensor_id,),
-        ).fetchall()
-        return {"items": [enrich_interface_metrics(conn, interface_dashboard_row_to_dict(row), sensor_id) for row in rows]}
+        filters = ["sensor_id = ?"]
+        params: list[Any] = [sensor_id]
+        if clean_text(monitor).lower() != "all":
+            filters.append("monitor_enabled = 1")
+        term = clean_text(q)
+        if term:
+            filters.append(
+                "(if_name LIKE ? OR if_alias LIKE ? OR if_descr LIKE ?)"
+            )
+            like = f"%{term}%"
+            params.extend([like, like, like])
+        where = " AND ".join(filters)
+        total = int(
+            conn.execute(
+                f"SELECT COUNT(*) AS c FROM sensor_interfaces WHERE {where}", params
+            ).fetchone()["c"]
+        )
+        sql = f"SELECT * FROM sensor_interfaces WHERE {where} ORDER BY if_index, id"
+        query_params = list(params)
+        if limit and limit > 0:
+            sql += " LIMIT ? OFFSET ?"
+            query_params.extend([int(limit), int(offset)])
+        rows = conn.execute(sql, query_params).fetchall()
+        items = [
+            enrich_interface_metrics(conn, interface_dashboard_row_to_dict(row), sensor_id)
+            for row in rows
+        ]
+    return {"items": items, "total": total, "limit": int(limit), "offset": int(offset), "monitor": clean_text(monitor) or "enabled"}
+
+
+def interface_inventory_rows(
+    conn: sqlite3.Connection,
+    *,
+    sensor_id: int | None = None,
+    sensor_name: str = "",
+    exporter_ip: str = "",
+    monitor: str = "all",
+    q: str = "",
+    sample_rate_override: str = "",
+    limit: int = 0,
+    offset: int = 0,
+) -> tuple[list[sqlite3.Row], int]:
+    """Inventario configurado (`sensor_interfaces` JOIN `sensors`).
+
+    Fonte de autoridade para nome/alias/descricao/config (inventory > observed).
+    Nao enriquece nada caro aqui: RX/TX/freshness ficam sob demanda.
+    """
+    filters: list[str] = []
+    params: list[Any] = []
+    if sensor_id is not None:
+        filters.append("si.sensor_id = ?")
+        params.append(int(sensor_id))
+    if clean_text(sensor_name):
+        filters.append("(s.name = ? OR s.exporter_ip = ?)")
+        params.extend([clean_text(sensor_name), clean_text(sensor_name)])
+    if clean_text(exporter_ip):
+        filters.append("s.exporter_ip = ?")
+        params.append(clean_text(exporter_ip))
+    if clean_text(monitor).lower() != "all":
+        filters.append("si.monitor_enabled = 1")
+    override = clean_text(sample_rate_override).lower()
+    if override in {"1", "true", "yes", "only", "override"}:
+        filters.append("si.sample_rate_override = 1")
+    elif override in {"0", "false", "no", "default"}:
+        filters.append("si.sample_rate_override = 0")
+    term = clean_text(q)
+    if term:
+        filters.append(
+            "(si.if_name LIKE ? OR si.if_alias LIKE ? OR si.if_descr LIKE ?"
+            " OR CAST(si.if_index AS TEXT) = ?)"
+        )
+        like = f"%{term}%"
+        params.extend([like, like, like, term])
+    where = ("WHERE " + " AND ".join(filters)) if filters else ""
+    total = int(
+        conn.execute(
+            "SELECT COUNT(*) AS c FROM sensor_interfaces si"
+            f" JOIN sensors s ON s.id = si.sensor_id {where}",
+            params,
+        ).fetchone()["c"]
+    )
+    sql = (
+        "SELECT si.*, s.name AS sensor_name, s.exporter_ip AS exporter_ip,"
+        " s.active AS sensor_active, s.sample_rate_default_in, s.sample_rate_default_out,"
+        " s.sample_rate_mode"
+        " FROM sensor_interfaces si JOIN sensors s ON s.id = si.sensor_id"
+        f" {where} ORDER BY s.name, si.if_index, si.id"
+    )
+    query_params = list(params)
+    if limit and limit > 0:
+        sql += " LIMIT ? OFFSET ?"
+        query_params.extend([int(limit), int(offset)])
+    return conn.execute(sql, query_params).fetchall(), total
+
+
+def interface_inventory_item(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    """Item de inventario para a tela de Interfaces (campos reais, sem invencao)."""
+    item = dict(row)
+    if_index = int(item.get("if_index") or 0)
+    return {
+        "sensor_id": item.get("sensor_id"),
+        "sensor_name": clean_text(item.get("sensor_name")),
+        "exporter_ip": clean_ip(item.get("exporter_ip")),
+        "if_index": if_index,
+        "ifIndex": if_index,
+        "if_name": clean_text(item.get("if_name")),
+        "ifName": clean_text(item.get("if_name")),
+        "if_descr": clean_text(item.get("if_descr")),
+        "if_descr_original": item.get("if_descr") or "",
+        "if_alias": clean_text(item.get("if_alias")),
+        "monitor_enabled": bool(item.get("monitor_enabled")),
+        "sample_rate_in": int(item.get("sample_rate_in") or 1),
+        "sample_rate_out": int(item.get("sample_rate_out") or 1),
+        "sample_rate_override": bool(item.get("sample_rate_override")),
+        "sample_rate_default_in": int(item.get("sample_rate_default_in") or 1),
+        "sample_rate_default_out": int(item.get("sample_rate_default_out") or 1),
+        "sample_rate_mode": clean_text(item.get("sample_rate_mode")) or "sensor_default",
+        "direction": clean_text(item.get("direction")),
+        "stats": item.get("stats") or "",
+        "source": "inventory",
+        "observed": None,
+        "observed_available": False,
+        "observed_note": (
+            "Cobertura 'observed' (interface vista em flow sem cadastro) exige a "
+            "leitura do flow_raw e nao e calculada nesta lista."
+        ),
+        "sensor_active": bool(item.get("sensor_active")),
+    }
+
+
+@app.get("/api/interfaces")
+def list_interfaces(
+    sensor_id: int | None = Query(None, ge=1),
+    sensor_name: str = Query(""),
+    exporter_ip: str = Query(""),
+    monitor: str = Query("all"),
+    q: str = Query(""),
+    sample_rate_override: str = Query(""),
+    enrich: bool = Query(False),
+    limit: int = Query(100, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+):
+    """Inventario de interfaces paginado (server-side) — fonte da tela V2.
+
+    Chave logica: (exporter_ip, if_index) — `ifIndex` sozinho e ambiguo entre
+    equipamentos. `source=inventory` (autoridade de nome/config). Campos caros
+    (RX/TX/SNMP) ficam atras de `enrich=1` para nao pagar por linha.
+    """
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        rows, total = interface_inventory_rows(
+            conn,
+            sensor_id=sensor_id,
+            sensor_name=sensor_name,
+            exporter_ip=exporter_ip,
+            monitor=monitor,
+            q=q,
+            sample_rate_override=sample_rate_override,
+            limit=limit,
+            offset=offset,
+        )
+        items = [interface_inventory_item(row) for row in rows]
+        if enrich:
+            for item in items:
+                metrics = enrich_interface_metrics(
+                    conn,
+                    {
+                        "if_index": item["if_index"],
+                        "sample_rate_override": 1 if item["sample_rate_override"] else 0,
+                    },
+                    int(item["sensor_id"]),
+                )
+                item["snmp_in_bps"] = metrics.get("snmp_in_bps")
+                item["snmp_out_bps"] = metrics.get("snmp_out_bps")
+                item["snmp_sample_time"] = metrics.get("snmp_sample_time")
+                item["snmp_if_oper_status"] = metrics.get("snmp_if_oper_status")
+                item["effective_sample_rate_in"] = metrics.get("effective_sample_rate_in")
+                item["effective_sample_rate_out"] = metrics.get("effective_sample_rate_out")
+    return {
+        "items": items,
+        "total": total,
+        "limit": int(limit),
+        "offset": int(offset),
+        "filters": {
+            "sensor_id": sensor_id,
+            "sensor_name": clean_text(sensor_name),
+            "exporter_ip": clean_text(exporter_ip),
+            "monitor": clean_text(monitor) or "all",
+            "q": clean_text(q),
+            "sample_rate_override": clean_text(sample_rate_override),
+            "enrich": bool(enrich),
+        },
+        "identity_key": ["exporter_ip", "if_index"],
+        "source": "inventory",
+    }
+
+
+def interface_name_map_for_exporters(
+    conn: sqlite3.Connection,
+    exporter_ips: set[str],
+) -> dict[tuple[str, int], dict[str, Any]]:
+    """Mapa (exporter_ip, if_index) -> inventario. UMA query, zero N+1."""
+    exporters = sorted({clean_ip(ip) for ip in exporter_ips if clean_ip(ip)})
+    if not exporters:
+        return {}
+    placeholders = ", ".join("?" for _ in exporters)
+    rows = conn.execute(
+        "SELECT si.if_index, si.if_name, si.if_alias, si.if_descr, si.monitor_enabled,"
+        " si.sample_rate_in, si.sample_rate_out, si.sample_rate_override,"
+        " s.id AS sensor_id, s.name AS sensor_name, s.exporter_ip AS exporter_ip"
+        " FROM sensor_interfaces si JOIN sensors s ON s.id = si.sensor_id"
+        f" WHERE s.exporter_ip IN ({placeholders})",
+        exporters,
+    ).fetchall()
+    return {
+        (clean_ip(row["exporter_ip"]), int(row["if_index"] or 0)): dict(row)
+        for row in rows
+        if int(row["if_index"] or 0) > 0
+    }
+
+
+def enrich_flow_rows_with_interfaces(
+    items: list[dict[str, Any]],
+    name_map: dict[tuple[str, int], dict[str, Any]],
+) -> None:
+    """Aditivo: adiciona nomes resolvidos sem tocar em input_if/output_if crus."""
+    for row in items:
+        exporter = clean_ip(row.get("exporter_ip"))
+        for prefix, column in (("input", "input_if"), ("output", "output_if")):
+            raw = row.get(column)
+            if_index = int(raw or 0)
+            meta = name_map.get((exporter, if_index)) if if_index > 0 else None
+            row[f"{prefix}_if_name"] = clean_text((meta or {}).get("if_name"))
+            row[f"{prefix}_if_alias"] = clean_text((meta or {}).get("if_alias"))
+            row[f"{prefix}_if_descr"] = clean_text((meta or {}).get("if_descr"))
+            row[f"{prefix}_interface_key"] = f"{exporter or '?'}|{if_index}" if if_index > 0 else ""
+            row[f"{prefix}_interface_source"] = "inventory" if meta else ("observed" if if_index > 0 else "")
+            row[f"{prefix}_interface_sensor_id"] = int((meta or {}).get("sensor_id") or 0) or None
+            row[f"{prefix}_interface_sensor_name"] = clean_text((meta or {}).get("sensor_name"))
 
 
 @app.put("/api/sensors/{sensor_id}")
 def update_sensor(sensor_id: int, payload: SensorPayload):
     ensure_sensor_db()
+    invalidate_sensor_sample_rate_cache(sensor_id)
     sensor_data, interfaces = normalize_sensor_payload(payload)
     now = utc_now_iso()
     assignments = ", ".join(f"{column} = ?" for column in SENSOR_COLUMNS)
@@ -43097,7 +43695,45 @@ def effective_sample_rate_from_config(
 
 
 def get_effective_sample_rate(sensor_id: int | None, if_index: int | None, direction: str, fallback: int = 1) -> int:
-    return effective_sample_rate_from_config(sensor_sample_rate_config(sensor_id), if_index, direction, fallback)
+    return effective_sample_rate_from_config(
+        sensor_sample_rate_config_cached(sensor_id),
+        if_index,
+        direction,
+        fallback,
+    )
+
+
+_SAMPLE_RATE_CONFIG_CACHE: dict[int, tuple[float, dict[str, Any] | None]] = {}
+
+
+def sensor_sample_rate_config_cached(
+    sensor_id: int | None,
+    ttl_seconds: float = 45.0,
+) -> dict[str, Any] | None:
+    """Config de sample-rate com cache curto por sensor (TTL 45 s).
+
+    Sem cache, `enrich_interface_metrics` relia sensores + TODAS as interfaces
+    do sensor DUAS vezes por interface (O(N^2) com 238 interfaces). O cache e
+    apenas de leitura e nao altera nenhum valor calculado.
+    """
+    if sensor_id is None:
+        return None
+    key = int(sensor_id)
+    now = time.monotonic()
+    cached = _SAMPLE_RATE_CONFIG_CACHE.get(key)
+    if cached is not None and (now - cached[0]) < ttl_seconds:
+        return cached[1]
+    config = sensor_sample_rate_config(key)
+    _SAMPLE_RATE_CONFIG_CACHE[key] = (now, config)
+    return config
+
+
+def invalidate_sensor_sample_rate_cache(sensor_id: int | None = None) -> None:
+    """Chamado por qualquer escrita de sample-rate para nao servir valor velho."""
+    if sensor_id is None:
+        _SAMPLE_RATE_CONFIG_CACHE.clear()
+        return
+    _SAMPLE_RATE_CONFIG_CACHE.pop(int(sensor_id), None)
 
 
 def clickhouse_ipv6_literal(value: Any) -> str:
@@ -48860,6 +49496,20 @@ def search_flows_payload(
         row["sample_rate_applied"] = round(float(row.get("sample_rate_applied") or 1), 2)
         items.append(row)
 
+    # R4/R5/R6 — resolucao ADITIVA por (exporter_ip, ifIndex): o inventario
+    # (sensor_interfaces) e a autoridade do nome; os ifIndex crus permanecem.
+    if items:
+        try:
+            with sqlite_connection() as if_conn:
+                name_map = interface_name_map_for_exporters(
+                    if_conn,
+                    {row.get("exporter_ip") for row in items},
+                )
+        except sqlite3.Error as exc:
+            logger.warning("Falha ao resolver interfaces dos flows: %s", exc)
+            name_map = {}
+        enrich_flow_rows_with_interfaces(items, name_map)
+
     return {
         "start": iso(start_dt),
         "end": iso(end_dt),
@@ -49382,22 +50032,14 @@ def top_flows(
                     {raw_sql}
                 )
                 GROUP BY {group_by}
-            ),
-            totals AS (
-                SELECT
-                    sum(bytes) AS total_bytes,
-                    sum(packets) AS total_packets,
-                    sum(flows) AS total_flows
-                FROM base
             )
         SELECT
             base.*,
             bytes * 8 / {{seconds:Float64}} AS bits_s,
             packets / {{seconds:Float64}} AS packets_s,
-            if(total_bytes > 0, bytes / total_bytes * 100, 0) AS percent_total,
+            if(sum(bytes) OVER () > 0, bytes / sum(bytes) OVER () * 100, 0) AS percent_total,
             dateDiff('second', first_seen, last_seen) AS duration_seconds
         FROM base
-        CROSS JOIN totals
         ORDER BY {order_expr} {direction_sql}
         LIMIT {{limit:UInt32}}
         """
