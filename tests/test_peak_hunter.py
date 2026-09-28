@@ -447,7 +447,7 @@ class PeakHunterTest(unittest.TestCase):
             conn.row_factory = sqlite3.Row
             try:
                 jobs = list_peak_hunter_jobs(conn)
-                self.assertEqual(jobs[0]["name"], "Default NE8000 dataset collector")
+                self.assertEqual(jobs[0]["name"], "Default dataset collector")
                 job = create_peak_hunter_job(
                     conn,
                     {

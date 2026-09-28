@@ -4951,7 +4951,7 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
               </div>
               <div class="field">
                 <label for="mapDstCidr">IP/CIDR destino</label>
-                <input id="mapDstCidr" class="form-control form-control-sm" placeholder="Ex: 179.189.80.0/24">
+                <input id="mapDstCidr" class="form-control form-control-sm" placeholder="Ex: 192.0.2.0/24">
               </div>
               <div class="field">
                 <label for="mapSeverity">Severidade</label>
@@ -5895,7 +5895,7 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
                 <div class="ip-zone-form-grid">
                   <div class="field">
                     <label for="ipZoneName">Nome da zona/cliente</label>
-                    <input id="ipZoneName" class="form-control form-control-sm" placeholder="Clientes Publicos FIBINET">
+                    <input id="ipZoneName" class="form-control form-control-sm" placeholder="Clientes publicos">
                   </div>
                   <div class="field">
                     <label for="ipZoneActive">Status</label>
@@ -7617,7 +7617,7 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
               </div>
               <div class="field">
                 <label for="peakHunterJobName">Nome</label>
-                <input id="peakHunterJobName" class="form-control form-control-sm" placeholder="Coleta NE8000">
+                <input id="peakHunterJobName" class="form-control form-control-sm" placeholder="Coleta de borda">
               </div>
               <div class="field">
                 <label for="peakHunterJobSensor">Sensor</label>
@@ -8236,10 +8236,10 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
               <div class="field"><label for="bgpConnectorLocalAsn">Local ASN</label><input id="bgpConnectorLocalAsn" type="number" min="1" class="form-control form-control-sm"></div>
               <div class="field"><label for="bgpConnectorPeerAsn">Peer ASN</label><input id="bgpConnectorPeerAsn" type="number" min="1" class="form-control form-control-sm"></div>
               <div class="field"><label for="bgpConnectorPeerIp">Peer IP</label><input id="bgpConnectorPeerIp" class="form-control form-control-sm"></div>
-              <div class="field"><label for="bgpConnectorLocalAddress">Local address</label><input id="bgpConnectorLocalAddress" class="form-control form-control-sm" placeholder="172.20.10.40"></div>
+              <div class="field"><label for="bgpConnectorLocalAddress">Local address</label><input id="bgpConnectorLocalAddress" class="form-control form-control-sm" placeholder="192.0.2.1"></div>
               <div class="field"><label for="bgpConnectorListenPort">Listen port</label><input id="bgpConnectorListenPort" type="number" min="1" max="65535" class="form-control form-control-sm" value="179"></div>
               <div class="field"><label for="bgpConnectorNextHop">Next-hop default</label><input id="bgpConnectorNextHop" class="form-control form-control-sm" placeholder="10.66.66.66"></div>
-              <div class="field"><label for="bgpConnectorCommunity">Community default</label><input id="bgpConnectorCommunity" class="form-control form-control-sm" placeholder="268568:666"></div>
+              <div class="field"><label for="bgpConnectorCommunity">Community default</label><input id="bgpConnectorCommunity" class="form-control form-control-sm" placeholder="65000:666"></div>
               <div class="field"><label for="bgpConnectorService">Systemd service</label><input id="bgpConnectorService" class="form-control form-control-sm" placeholder="exabgp-gmj-flow"></div>
               <div class="field"><label for="bgpConnectorPipeIn">Pipe input</label><input id="bgpConnectorPipeIn" class="form-control form-control-sm" placeholder="/run/exabgp/exabgp.in"></div>
               <div class="field"><label for="bgpConnectorPipeOut">Pipe output</label><input id="bgpConnectorPipeOut" class="form-control form-control-sm" placeholder="/run/exabgp/exabgp.out"></div>
@@ -14067,7 +14067,7 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
         document.getElementById('networkAssetAddressingMode').value = asset.addressing_mode || 'NONE';
         document.getElementById('networkAssetZone').value = asset.zone_id ? String(asset.zone_id) : '';
       } else if (hostMode) {
-        document.getElementById('networkAssetPrefix').placeholder = '45.163.144.18/32';
+        document.getElementById('networkAssetPrefix').placeholder = '192.0.2.1/32';
         document.getElementById('networkAssetFormHint').textContent = 'Host /32 (ou /128 IPv6).';
       }
       document.getElementById('networkAssetPrefix').focus();

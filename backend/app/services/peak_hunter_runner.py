@@ -114,6 +114,20 @@ def _ensure_peak_hunter_job_column(conn: sqlite3.Connection, column: str, ddl: s
         conn.execute(f"ALTER TABLE peak_hunter_jobs ADD COLUMN {ddl}")
 
 
+DEFAULT_PEAK_HUNTER_JOB_NAME = "Default dataset collector"
+
+
+def default_peak_hunter_job_name() -> str:
+    """Nome do job inicial do Peak Hunter (configuravel por ambiente)."""
+    configured = (os.getenv("GMJFLOW_PEAK_HUNTER_DEFAULT_JOB_NAME") or "").strip()
+    return configured or DEFAULT_PEAK_HUNTER_JOB_NAME
+
+
+def default_peak_hunter_job_sensor() -> str:
+    """Sensor do job inicial. Vazio por padrao: nao presume equipamento de um site."""
+    return (os.getenv("GMJFLOW_PEAK_HUNTER_DEFAULT_SENSOR") or "").strip()
+
+
 def seed_default_peak_hunter_job(conn: sqlite3.Connection) -> None:
     count = conn.execute("SELECT COUNT(*) AS count FROM peak_hunter_jobs").fetchone()["count"]
     if int(count or 0) > 0:
@@ -131,8 +145,8 @@ def seed_default_peak_hunter_job(conn: sqlite3.Connection) -> None:
         """,
         (
             0,
-            "Default NE8000 dataset collector",
-            "NE8000-BGP-FIBINET",
+            default_peak_hunter_job_name(),
+            default_peak_hunter_job_sensor(),
             None,
             "both",
             "packets_s",
