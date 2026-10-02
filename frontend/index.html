@@ -9078,8 +9078,10 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
           </div>
           <div id="mediaTestFormPane">
             <div class="ip-zone-form-grid">
-              <div class="field"><label for="mediaTestTargetIp">IP alvo</label><input id="mediaTestTargetIp" class="form-control form-control-sm" value="100.64.17.245"></div>
-              <div class="field"><label for="mediaTestTargetPort">Porta</label><input id="mediaTestTargetPort" type="number" min="0" max="65535" class="form-control form-control-sm" value="443"></div>
+              <div class="field"><label for="mediaTestSrcIp">IP origem</label><input id="mediaTestSrcIp" class="form-control form-control-sm" value="198.51.100.25"></div>
+              <div class="field"><label for="mediaTestSrcPort">Porta origem</label><input id="mediaTestSrcPort" type="number" min="0" max="65535" class="form-control form-control-sm" value="54321"></div>
+              <div class="field"><label for="mediaTestTargetIp">IP destino / alvo</label><input id="mediaTestTargetIp" class="form-control form-control-sm" value="100.64.18.250"></div>
+              <div class="field"><label for="mediaTestTargetPort">Porta destino</label><input id="mediaTestTargetPort" type="number" min="0" max="65535" class="form-control form-control-sm" value="53"></div>
               <div class="field"><label for="mediaTestProtocol">Protocolo</label>
                 <select id="mediaTestProtocol" class="form-select form-select-sm">
                   <option value="udp" selected>udp</option>
@@ -9105,11 +9107,22 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
               </div>
               <div class="field"><label for="mediaTestPps">PPS</label><input id="mediaTestPps" type="number" min="0" step="1" class="form-control form-control-sm" value="420000"></div>
               <div class="field"><label for="mediaTestBps">BPS</label><input id="mediaTestBps" type="number" min="0" step="1" class="form-control form-control-sm" value="3800000000"></div>
-              <div class="field"><label for="mediaTestSensorId">Sensor ID (opcional)</label><input id="mediaTestSensorId" type="number" min="1" step="1" class="form-control form-control-sm" placeholder="ex: 3"></div>
+              <div class="field"><label for="mediaTestFlows">Flows</label><input id="mediaTestFlows" type="number" min="0" step="1" class="form-control form-control-sm" value="12"></div>
+              <div class="field"><label for="mediaTestUniqueSrcIps">Unique src IPs</label><input id="mediaTestUniqueSrcIps" type="number" min="0" step="1" class="form-control form-control-sm" value="1"></div>
+              <div class="field"><label for="mediaTestUniqueDstIps">Unique dst IPs</label><input id="mediaTestUniqueDstIps" type="number" min="0" step="1" class="form-control form-control-sm" value="1"></div>
+              <div class="field"><label for="mediaTestUniqueDstPorts">Unique dst ports</label><input id="mediaTestUniqueDstPorts" type="number" min="0" step="1" class="form-control form-control-sm" value="1"></div>
+              <div class="field"><label for="mediaTestSensorId">Sensor</label><select id="mediaTestSensorId" class="form-select form-select-sm"><option value="">Nenhum (sem sensor)</option></select></div>
             </div>
           </div>
           <div id="mediaTestJsonPane" class="d-none">
-            <textarea id="mediaTestJson" class="form-control form-control-sm" rows="12" spellcheck="false"></textarea>
+            <div class="subtle mb-1">Edite os dados do evento (objeto <code>data</code>) e confira abaixo o payload renderizado que será enviado.</div>
+            <textarea id="mediaTestJson" class="form-control form-control-sm" rows="10" spellcheck="false"></textarea>
+            <div class="toolbar mt-2" style="flex-wrap: wrap; gap: 6px;">
+              <select id="mediaTestPreviewDestination" class="form-select form-select-sm" style="max-width: 340px;"></select>
+              <button id="mediaTestPreviewButton" type="button" class="btn btn-sm btn-outline-secondary">Pré-visualizar payload</button>
+              <span id="mediaTestPreviewHint" class="subtle"></span>
+            </div>
+            <pre id="mediaTestPreview" class="subtle mt-1" style="max-height: 320px; overflow: auto; font-size: 11px; padding: 8px; border: 1px solid var(--border); border-radius: 6px; margin-bottom: 0;">—</pre>
           </div>
           <div class="toolbar mt-2">
             <button id="mediaTestSendButton" type="button" class="btn btn-sm btn-success"><i data-lucide="send"></i><span>Enviar evento de teste</span></button>
@@ -9186,7 +9199,7 @@ Webhook e integração de mídia funcionando.</textarea></div>
                 <div id="mediaSecretHint" class="subtle">Opcional. Enviado no header configurado, cifrado no banco.</div>
                 <div class="field">
                   <label for="mediaPayloadTemplate">Payload JSON</label>
-                  <div class="subtle mb-1">Template com placeholders (ex.: <code>{{event}}</code>, <code>{{sensor_name}}</code>, <code>{{pps}}</code>). Vale para produção e para o teste; o teste marca <code>test=true</code>.</div>
+                  <div class="subtle mb-1">Template com placeholders (ex.: <code>{{event}}</code>, <code>{{sensor_name}}</code>, <code>{{pps}}</code>). Vale para produção e para o teste. O <code>{{test}}</code> vira <code>true</code> no teste e <code>false</code> em produção — só aparece se o template o declarar.</div>
                   <textarea id="mediaPayloadTemplate" class="form-control form-control-sm" rows="14" spellcheck="false" style="font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11px;"></textarea>
                   <div class="toolbar mt-2" style="flex-wrap: wrap; gap: 6px;">
                     <button id="mediaPayloadRestoreButton" type="button" class="btn btn-sm btn-outline-secondary">Restaurar padrão</button>
@@ -31970,6 +31983,8 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       if (Array.isArray(payload.payload_placeholders)) {
         mediaPayloadPlaceholders = payload.payload_placeholders;
       }
+      renderMediaTestSensorOptions();
+      renderMediaTestPreviewDestinationOptions();
       return Boolean(mediaDefaultPayloadTemplate);
     }
 
@@ -32353,8 +32368,10 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     }
 
     const MEDIA_TEST_DEFAULTS = {
-      target_ip: '100.64.17.245',
-      target_port: 443,
+      src_ip: '198.51.100.25',
+      src_port: 54321,
+      target_ip: '100.64.18.250',
+      target_port: 53,
       protocol: 'udp',
       vector_name: 'TEST_UDP_FLOOD',
       display_name: 'Teste UDP Flood',
@@ -32363,12 +32380,18 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       direction: 'receives',
       pps: 420000,
       bps: 3800000000,
+      flows: 12,
+      unique_src_ips: 1,
+      unique_dst_ips: 1,
+      unique_dst_ports: 1,
       sensor_id: null,
     };
     let mediaTestMode = 'form';
 
     function mediaTestReadForm() {
       return {
+        src_ip: document.getElementById('mediaTestSrcIp').value.trim(),
+        src_port: Number(document.getElementById('mediaTestSrcPort').value || 0),
         target_ip: document.getElementById('mediaTestTargetIp').value.trim(),
         target_port: Number(document.getElementById('mediaTestTargetPort').value || 0),
         protocol: document.getElementById('mediaTestProtocol').value,
@@ -32379,12 +32402,18 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         direction: document.getElementById('mediaTestDirection').value,
         pps: Number(document.getElementById('mediaTestPps').value || 0),
         bps: Number(document.getElementById('mediaTestBps').value || 0),
+        flows: Number(document.getElementById('mediaTestFlows').value || 0),
+        unique_src_ips: Number(document.getElementById('mediaTestUniqueSrcIps').value || 0),
+        unique_dst_ips: Number(document.getElementById('mediaTestUniqueDstIps').value || 0),
+        unique_dst_ports: Number(document.getElementById('mediaTestUniqueDstPorts').value || 0),
         sensor_id: Number(document.getElementById('mediaTestSensorId').value || 0) || null,
       };
     }
 
     function mediaTestWriteForm(data) {
       const value = { ...MEDIA_TEST_DEFAULTS, ...(data || {}) };
+      document.getElementById('mediaTestSrcIp').value = value.src_ip ?? '';
+      document.getElementById('mediaTestSrcPort').value = value.src_port ?? '';
       document.getElementById('mediaTestTargetIp').value = value.target_ip ?? '';
       document.getElementById('mediaTestTargetPort').value = value.target_port ?? '';
       document.getElementById('mediaTestProtocol').value = value.protocol || 'udp';
@@ -32395,6 +32424,10 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       document.getElementById('mediaTestDirection').value = value.direction || 'receives';
       document.getElementById('mediaTestPps').value = value.pps ?? 0;
       document.getElementById('mediaTestBps').value = value.bps ?? 0;
+      document.getElementById('mediaTestFlows').value = value.flows ?? 0;
+      document.getElementById('mediaTestUniqueSrcIps').value = value.unique_src_ips ?? 0;
+      document.getElementById('mediaTestUniqueDstIps').value = value.unique_dst_ips ?? 0;
+      document.getElementById('mediaTestUniqueDstPorts').value = value.unique_dst_ports ?? 0;
       document.getElementById('mediaTestSensorId').value = value.sensor_id ?? '';
     }
 
@@ -32417,6 +32450,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       if (mode === 'json') {
         document.getElementById('mediaTestJson').value = JSON.stringify(mediaTestReadForm(), null, 2);
         setText('mediaTestStatus', 'Editando o objeto "data" em JSON.');
+        mediaTestPreviewPayload().catch(() => {});
       } else {
         const parsed = mediaTestParseJson();
         if (parsed.ok) {
@@ -32430,6 +32464,60 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       mediaTestMode = mode;
       document.getElementById('mediaTestFormPane').classList.toggle('d-none', mode !== 'form');
       document.getElementById('mediaTestJsonPane').classList.toggle('d-none', mode !== 'json');
+    }
+
+    function renderMediaTestSensorOptions() {
+      const select = document.getElementById('mediaTestSensorId');
+      if (!select) return;
+      const current = select.value;
+      const options = ['<option value="">Nenhum (sem sensor)</option>'];
+      mediaSensors.forEach(sensor => {
+        options.push(`<option value="${Number(sensor.id)}">${escapeHtml(mediaSensorLabel(sensor))}</option>`);
+      });
+      select.innerHTML = options.join('');
+      select.value = current;
+    }
+
+    function renderMediaTestPreviewDestinationOptions() {
+      const select = document.getElementById('mediaTestPreviewDestination');
+      if (!select) return;
+      const current = select.value;
+      const options = ['<option value="">Template padrão</option>'];
+      mediaItems.forEach(item => {
+        options.push(`<option value="${Number(item.id)}">${escapeHtml(item.name || `Destino #${item.id}`)}</option>`);
+      });
+      select.innerHTML = options.join('');
+      select.value = current;
+    }
+
+    function mediaTestPreviewPayloadData() {
+      if (mediaTestMode === 'json') {
+        const parsed = mediaTestParseJson();
+        if (!parsed.ok) throw new Error(parsed.error);
+        return parsed.data;
+      }
+      return mediaTestReadForm();
+    }
+
+    async function mediaTestPreviewPayload() {
+      const node = document.getElementById('mediaTestPreview');
+      setText('mediaTestPreviewHint', 'Renderizando…');
+      try {
+        const data = mediaTestPreviewPayloadData();
+        const destinationId = Number(document.getElementById('mediaTestPreviewDestination')?.value || 0) || null;
+        const result = await apiRequest('/api/media/test-event/preview', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ...data, destination_id: destinationId }),
+        });
+        if (node) node.textContent = JSON.stringify(result.payload, null, 2);
+        setText('mediaTestPreviewHint', result.uses_default_template
+          ? 'Template padrão (cada destino pode ter o seu).'
+          : `Template do destino: ${result.destination?.name || ''}`);
+      } catch (error) {
+        if (node) node.textContent = '—';
+        setText('mediaTestPreviewHint', `Falha: ${error.message}`);
+      }
     }
 
     function renderMediaTestResults(payload) {
@@ -32469,7 +32557,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         });
         const okCount = renderMediaTestResults(payload);
         const total = Array.isArray(payload?.results) ? payload.results.length : 0;
-        setText('mediaTestStatus', `Evento de teste (test=true) enviado para ${total} webhook(s); ${okCount} com sucesso. Nada foi gravado como anomalia real.`);
+        setText('mediaTestStatus', `Evento de teste enviado para ${total} webhook(s); ${okCount} com sucesso. Nada foi gravado como anomalia real.`);
       } catch (error) {
         setText('mediaTestStatus', `Falha: ${error.message}`);
       }
@@ -32500,9 +32588,13 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
 
     function bindMediaTestTools() {
       mediaTestWriteForm(MEDIA_TEST_DEFAULTS);
+      renderMediaTestSensorOptions();
+      renderMediaTestPreviewDestinationOptions();
       document.getElementById('mediaTestModeFormButton')?.addEventListener('click', () => setMediaTestMode('form'));
       document.getElementById('mediaTestModeJsonButton')?.addEventListener('click', () => setMediaTestMode('json'));
       document.getElementById('mediaTestSendButton')?.addEventListener('click', () => sendMediaTestEvent().catch(error => setText('mediaTestStatus', `Falha: ${error.message}`)));
+      document.getElementById('mediaTestPreviewButton')?.addEventListener('click', () => mediaTestPreviewPayload().catch(error => setText('mediaTestPreviewHint', `Falha: ${error.message}`)));
+      document.getElementById('mediaTestPreviewDestination')?.addEventListener('change', () => mediaTestPreviewPayload().catch(() => {}));
       document.getElementById('mediaTelegramSendButton')?.addEventListener('click', () => sendMediaTestTelegram().catch(error => setText('mediaTelegramStatus', `Falha: ${error.message}`)));
     }
     function bindMediaView() {

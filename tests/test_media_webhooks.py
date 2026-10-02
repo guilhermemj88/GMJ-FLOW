@@ -454,20 +454,35 @@ class MediaPayloadTemplateTest(MediaBase):
         test_envelope = post.call_args[0][1]
         self.assertEqual({k: v for k, v in production.items() if k != "test"}, {k: v for k, v in test_envelope.items() if k != "test"})
 
-    def test_e_test_flag_only_on_test(self):
-        template = '{"event": "{{event}}"}'  # sem {{test}}: producao nao ganha a chave
-        self._insert(payload_template=template)
-        data = self._data()
-        media_dispatch.dispatch_media_event("anomaly_detected", data)
-        production = self._drain()[0]["envelope"]
-        self.assertNotIn("test", production)
+    def test_e_test_flag_semantics(self):
+        media_id = self._insert(payload_template='{"event": "{{event}}"}')
+        # (1) template sem {{test}}: nem producao nem teste ganham a chave
+        media_dispatch.dispatch_media_event("anomaly_detected", self._data())
+        self.assertNotIn("test", self._drain()[0]["envelope"])
         with mock.patch.object(
             media_dispatch,
             "post_json",
             return_value={"ok": True, "http_status": 200, "duration_ms": 1, "error": ""},
         ) as post:
-            media_dispatch.send_test_event({"target_ip": "100.64.17.245", "severity": "critical"})
-        self.assertTrue(post.call_args[0][1]["test"])
+            media_dispatch.send_test_event({"severity": "critical"})
+        self.assertNotIn("test", post.call_args[0][1])
+
+        # (2) template com {{test}}: teste => true, producao => false
+        explicit = '{"event": "{{event}}", "test": {{test}}}'
+        with backend_main.sqlite_connection() as conn:
+            conn.execute(
+                "UPDATE media_integrations SET payload_template = ? WHERE id = ?", (explicit, media_id)
+            )
+            conn.commit()
+        media_dispatch.dispatch_media_event("anomaly_detected", self._data())
+        self.assertIs(self._drain()[0]["envelope"]["test"], False)
+        with mock.patch.object(
+            media_dispatch,
+            "post_json",
+            return_value={"ok": True, "http_status": 200, "duration_ms": 1, "error": ""},
+        ) as post:
+            media_dispatch.send_test_event({"severity": "critical"})
+        self.assertIs(post.call_args[0][1]["test"], True)
 
     def test_f_numeric_placeholder_stays_number(self):
         template = '{"pps": {{pps}}, "event_id": {{event_id}}, "target_port": {{target_port}}}'
@@ -518,6 +533,132 @@ class MediaPayloadTemplateTest(MediaBase):
         self.assertEqual(cleared["payload_template"], "")
         # volta a usar o default sem alterar o payload legado
         self.assertEqual(cleared["allSensors"], True)
+
+
+class MediaTestEventPayloadMappingTest(MediaBase):
+    """Enriquecimento do evento de teste: origem/destino, sensor e preview (A-F)."""
+
+    def _payload(self, **overrides):
+        values = {
+            "src_ip": "198.51.100.25",
+            "src_port": 54321,
+            "target_ip": "100.64.18.250",
+            "target_port": 53,
+            "protocol": "udp",
+            "vector_name": "TEST_UDP_FLOOD",
+            "display_name": "Teste UDP Flood",
+            "source_name": "Evento manual de teste",
+            "severity": "critical",
+            "direction": "receives",
+            "pps": 420000,
+            "bps": 3800000000,
+            "sensor_id": None,
+            "flows": 12,
+            "unique_src_ips": 1,
+            "unique_dst_ips": 1,
+            "unique_dst_ports": 1,
+        }
+        values.update(overrides)
+        return backend_main.MediaTestEventPayload(**values)
+
+    def _data(self, payload):
+        with backend_main.sqlite_connection() as conn:
+            return backend_main.media_test_event_data(payload, conn)
+
+    def test_a_source_destination_mapping(self):
+        data = self._data(self._payload())
+        self.assertEqual(data["top_src_ip"], "198.51.100.25")
+        self.assertEqual(data["top_src_port"], 54321)
+        self.assertEqual(data["top_dst_ip"], "100.64.18.250")
+        self.assertEqual(data["top_dst_port"], 53)
+        self.assertEqual(data["target_ip"], "100.64.18.250")
+        self.assertEqual(data["target_port"], 53)
+
+    def test_b_cgnat_source_is_accepted(self):
+        data = self._data(self._payload(src_ip="100.64.17.245", src_port=54321))
+        self.assertEqual(data["top_src_ip"], "100.64.17.245")
+        self.assertEqual(data["top_src_port"], 54321)
+
+    def test_c_sensor_is_resolved_automatically(self):
+        self.insert_sensor(7, "SENSOR-TESTE", "203.0.113.9")
+        data = self._data(self._payload(sensor_id=7))
+        self.assertEqual(data["sensor_id"], 7)
+        self.assertEqual(data["sensor_name"], "SENSOR-TESTE")
+        self.assertEqual(data["exporter_ip"], "203.0.113.9")
+        self.assertEqual(data["sensor_resolution"], "single")
+        self.assertEqual(data["sensor"], "SENSOR-TESTE")
+
+    def test_no_sensor_does_not_invent_one(self):
+        data = self._data(self._payload(sensor_id=None))
+        self.assertIsNone(data["sensor_id"])
+        self.assertIsNone(data["sensor_name"])
+        self.assertEqual(data["exporter_ip"], "")
+        self.assertEqual(data["sensor_resolution"], "unresolved")
+
+    def test_unknown_sensor_is_rejected(self):
+        with self.assertRaises(backend_main.HTTPException):
+            self._data(self._payload(sensor_id=999))
+
+    def test_d_numeric_types_are_preserved(self):
+        data = self._data(self._payload(flows=7, unique_src_ips=3, unique_dst_ips=4, unique_dst_ports=5, pps=1000, bps=2000))
+        for key in ("pps", "bps", "packets_s", "bits_s", "flows"):
+            self.assertIsInstance(data[key], float, key)
+        for key in ("unique_src_ips", "unique_dst_ips", "unique_dst_ports", "top_src_port", "target_port"):
+            self.assertIsInstance(data[key], int, key)
+        self.assertEqual(data["flows"], 7.0)
+        self.assertEqual(data["unique_src_ips"], 3)
+
+    def test_e_preview_exposes_the_same_values_that_would_be_sent(self):
+        preview = backend_main.media_test_event_preview(self._payload(), request=None)
+        self.assertTrue(preview["ok"])
+        self.assertEqual(preview["payload"]["data"], preview["data"])
+        for key in (
+            "top_src_ip", "top_src_port", "top_dst_ip", "top_dst_port",
+            "target_ip", "target_port", "sensor_name", "exporter_ip",
+            "flows", "unique_src_ips", "unique_dst_ips", "unique_dst_ports", "pps", "bps",
+        ):
+            self.assertIn(key, preview["payload"]["data"])
+
+    def test_e_preview_can_use_a_destination_template(self):
+        media_id = backend_main.create_media(
+            self.payload(payload_template='{"event": "{{event}}", "src": "{{top_src_ip}}", "pps": {{pps}}}'),
+            request=None,
+        )["id"]
+        preview = backend_main.media_test_event_preview(self._payload(destination_id=media_id), request=None)
+        self.assertEqual(preview["payload"], {"event": "anomaly_detected", "src": "198.51.100.25", "pps": 420000.0})
+        self.assertFalse(preview["uses_default_template"])
+        self.assertEqual(preview["destination"]["id"], media_id)
+
+    def test_test_flag_only_exists_when_template_declares_it(self):
+        # default nao declara {{test}}: teste tambem nao ganha a chave
+        preview = backend_main.media_test_event_preview(self._payload(), request=None)
+        self.assertNotIn("test", preview["payload"])
+        production = media_dispatch.render_payload_from_template(
+            media_dispatch.DEFAULT_PAYLOAD_TEMPLATE,
+            dict(media_dispatch.TEST_SAMPLE_EVENT),
+            event_type="anomaly_detected",
+            is_test=False,
+        )
+        self.assertNotIn("test", production)
+        # template explicito: teste true / producao false
+        explicit = '{"event": "{{event}}", "test": {{test}}}'
+        data = self._data(self._payload())
+        self.assertIs(
+            media_dispatch.render_payload_from_template(explicit, data, event_type="anomaly_detected", is_test=True)["test"],
+            True,
+        )
+        self.assertIs(
+            media_dispatch.render_payload_from_template(explicit, data, event_type="anomaly_detected", is_test=False)["test"],
+            False,
+        )
+
+    def test_f_production_payload_is_not_affected(self):
+        data = dict(media_dispatch.TEST_SAMPLE_EVENT)
+        production = media_dispatch.render_payload_from_template(
+            media_dispatch.DEFAULT_PAYLOAD_TEMPLATE, data, event_type="anomaly_detected", is_test=False
+        )
+        self.assertEqual(sorted(production.keys()), ["data", "event", "sent_at", "version"])
+        self.assertEqual(production["data"], data)
 
 
 class MediaHttpTest(MediaBase):
@@ -904,7 +1045,7 @@ class MediaTestEventTest(MediaBase):
                 for table in ("anomaly_events", "security_anomalies", "media_delivery_logs")
             }
 
-    def test_envelope_has_test_flag_and_typed_values(self):
+    def test_envelope_has_typed_values_without_test_key_by_default(self):
         self._insert_media()
         with mock.patch.object(media_dispatch, "post_json", return_value={"ok": True, "http_status": 200, "duration_ms": 7, "error": ""}):
             payload = media_dispatch.send_test_event({
@@ -921,7 +1062,8 @@ class MediaTestEventTest(MediaBase):
                 "bps": 3800000000,
             })
         envelope = payload["envelope"]
-        self.assertTrue(envelope["test"])
+        # o template padrao nao declara {{test}}, entao a chave nao e injetada
+        self.assertNotIn("test", envelope)
         self.assertEqual(envelope["version"], 1)
         self.assertEqual(envelope["event"], "anomaly_detected")
         data = envelope["data"]
@@ -977,7 +1119,8 @@ class MediaTestEventTest(MediaBase):
         )
         with mock.patch.object(media_dispatch, "post_json", return_value={"ok": True, "http_status": 200, "duration_ms": 11, "error": ""}):
             result = backend_main.media_test_event(body, request=None)
-        self.assertTrue(result["envelope"]["test"])
+        # template padrao nao declara {{test}}: a chave nao e injetada
+        self.assertNotIn("test", result["envelope"])
         self.assertEqual(result["results"][0]["http_status"], 200)
 
         with mock.patch.object(backend_main, "require_permission", side_effect=backend_main.HTTPException(status_code=403, detail="negado")):

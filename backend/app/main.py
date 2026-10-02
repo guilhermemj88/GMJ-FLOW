@@ -28900,8 +28900,10 @@ def withdraw_bgp_announcement(request: Request, announcement_id: int):
 
 # Midia / Alertas por Webhook -------------------------------------------------
 class MediaTestEventPayload(BaseModel):
-    target_ip: str = "100.64.17.245"
-    target_port: int = 443
+    target_ip: str = "100.64.18.250"
+    target_port: int = 53
+    src_ip: str = "198.51.100.25"
+    src_port: int = 54321
     protocol: str = "udp"
     vector_name: str = "TEST_UDP_FLOOD"
     display_name: str = "Teste UDP Flood"
@@ -28911,6 +28913,12 @@ class MediaTestEventPayload(BaseModel):
     pps: float = 420000
     bps: float = 3800000000
     sensor_id: int | None = None
+    flows: float = 12
+    unique_src_ips: int = 1
+    unique_dst_ips: int = 1
+    unique_dst_ports: int = 1
+    # Usado apenas pelo endpoint de preview (nao interfere no envio).
+    destination_id: int | None = None
 
 
 class MediaTestTelegramPayload(BaseModel):
@@ -28931,22 +28939,129 @@ def media_test_event(payload: MediaTestEventPayload, request: Request):
     """
     require_permission(request, "settings.manage")
     ensure_sensor_db()
-    data = {
-        "event_id": 0,
-        "target_ip": clean_text(payload.target_ip),
-        "target_port": int(payload.target_port or 0),
-        "protocol": clean_text(payload.protocol).lower(),
-        "vector_name": clean_text(payload.vector_name),
-        "display_name": clean_text(payload.display_name),
-        "source_name": clean_text(payload.source_name),
-        "severity": media_dispatch.normalize_severity(payload.severity),
-        "direction": clean_text(payload.direction),
-        "status": "test",
-        "pps": float(payload.pps or 0),
-        "bps": float(payload.bps or 0),
-        "sensor_id": int(getattr(payload, "sensor_id", None) or 0) or None,
-    }
+    with sqlite_connection() as conn:
+        data = media_test_event_data(payload, conn)
     return media_dispatch.send_test_event(data)
+
+
+def media_test_event_data(payload: MediaTestEventPayload, conn: sqlite3.Connection | None = None) -> dict[str, Any]:
+    """Monta o objeto `data` do evento de teste.
+
+    Origem e destino sao explicitos:
+      target_ip/target_port  -> IP/porta de DESTINO (compatibilidade)
+      top_src_ip/top_src_port -> IP/porta de ORIGEM
+      top_dst_ip/top_dst_port -> IP/porta de DESTINO
+
+    Se um sensor for informado, os campos sensor_id/sensor_name/exporter_ip/
+    sensor_resolution sao resolvidos no cadastro. Sem sensor, ficam nulos
+    (sensor_resolution="unresolved") sem inventar dados.
+    """
+
+    def value(name: str, default: Any) -> Any:
+        raw = getattr(payload, name, default)
+        return default if raw is None else raw
+
+    sensor_fields: dict[str, Any] = {
+        "sensor_id": None,
+        "sensor_name": None,
+        "exporter_ip": "",
+        "sensor_resolution": "unresolved",
+    }
+    sensor_id = value("sensor_id", None)
+    if sensor_id:
+        row = None
+        if conn is not None:
+            row = conn.execute(
+                "SELECT name, exporter_ip FROM sensors WHERE id = ? LIMIT 1", (int(sensor_id),)
+            ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=400, detail=f"Sensor inexistente: {int(sensor_id)}")
+        sensor_fields = {
+            "sensor_id": int(sensor_id),
+            "sensor_name": clean_text(row["name"]),
+            "exporter_ip": clean_text(row["exporter_ip"]),
+            "sensor_resolution": "single",
+        }
+
+    dest_ip = clean_text(value("target_ip", ""))
+    dest_port = int(value("target_port", 0) or 0)
+    src_ip = clean_text(value("src_ip", ""))
+    src_port = int(value("src_port", 0) or 0)
+    pps = float(value("pps", 0) or 0)
+    bps = float(value("bps", 0) or 0)
+    return {
+        "event_id": 0,
+        "status": "test",
+        "target_ip": dest_ip,
+        "target_cidr": f"{dest_ip}/32" if dest_ip else "",
+        "target_port": dest_port,
+        "top_src_ip": src_ip,
+        "top_src_port": src_port,
+        "top_dst_ip": dest_ip,
+        "top_dst_port": dest_port,
+        "protocol": clean_text(value("protocol", "udp")).lower(),
+        "vector_name": clean_text(value("vector_name", "")),
+        "display_name": clean_text(value("display_name", "")),
+        "source_name": clean_text(value("source_name", "")),
+        "severity": media_dispatch.normalize_severity(value("severity", "critical")),
+        "direction": clean_text(value("direction", "receives")),
+        "pps": pps,
+        "bps": bps,
+        "packets_s": pps,
+        "bits_s": bps,
+        "flows": float(value("flows", 0) or 0),
+        "unique_src_ips": int(value("unique_src_ips", 0) or 0),
+        "unique_dst_ips": int(value("unique_dst_ips", 0) or 0),
+        "unique_dst_ports": int(value("unique_dst_ports", 0) or 0),
+        "sensor": clean_text(sensor_fields.get("sensor_name")),
+        **sensor_fields,
+    }
+
+
+@app.post("/api/media/test-event/preview")
+def media_test_event_preview(payload: MediaTestEventPayload, request: Request):
+    """Renderiza o payload de teste sem enviar nada.
+
+    Usa o template do destino informado em `destination_id`; sem destino, usa o
+    template padrao. Sempre com test=true (mesmo caminho do envio real).
+    """
+    require_permission(request, "settings.manage")
+    ensure_sensor_db()
+    destination: dict[str, Any] | None = None
+    with sqlite_connection() as conn:
+        data = media_test_event_data(payload, conn)
+        # O envio real usa TEST_SAMPLE_EVENT como base e sobrepoe os dados do
+        # formulario; o preview renderiza exatamente a mesma base.
+        merged = dict(media_dispatch.TEST_SAMPLE_EVENT)
+        merged.update(data)
+        template = media_dispatch.DEFAULT_PAYLOAD_TEMPLATE
+        destination_id = getattr(payload, "destination_id", None)
+        if destination_id:
+            row = conn.execute(
+                "SELECT id, name, payload_template FROM media_integrations WHERE id = ? LIMIT 1",
+                (int(destination_id),),
+            ).fetchone()
+            if row is None:
+                raise HTTPException(status_code=404, detail="Destino nao encontrado")
+            destination = dict(row)
+            template = clean_text(row["payload_template"]) or media_dispatch.DEFAULT_PAYLOAD_TEMPLATE
+    try:
+        rendered = media_dispatch.render_payload_from_template(
+            template, merged, event_type="anomaly_detected", is_test=True
+        )
+    except media_dispatch.MediaTemplateError as exc:
+        raise HTTPException(status_code=400, detail=f"Payload invalido: {exc}") from exc
+    return {
+        "ok": True,
+        "data": merged,
+        "payload": rendered,
+        "destination": (
+            {"id": int(destination["id"]), "name": clean_text(destination["name"])}
+            if destination is not None
+            else None
+        ),
+        "uses_default_template": destination is None or not clean_text(destination.get("payload_template")),
+    }
 
 
 @app.post("/api/media/test-telegram")

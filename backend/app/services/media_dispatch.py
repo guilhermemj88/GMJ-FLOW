@@ -113,8 +113,9 @@ MEDIA_PLACEHOLDERS = (
 
 # Template padrao: reproduz 1:1 o payload que o GMJ-FLOW envia hoje. Campos
 # numericos/booleanos/anulaveis ficam SEM aspas para preservar o tipo JSON.
-# Obs.: o payload de producao atual NAO tem a chave "test" (ela so existe no
-# teste). Por isso o default nao a inclui; o caminho de teste marca test=true.
+# Obs.: nenhum payload recebe a chave "test" automaticamente. Ela so aparece se
+# o template do destino declarar explicitamente "test": {{test}} (entao vira
+# true no teste e false em producao).
 DEFAULT_PAYLOAD_TEMPLATE = """{
   "version": {{version}},
   "event": "{{event}}",
@@ -797,8 +798,6 @@ def render_payload_from_template(
         payload = json.loads(rendered)
     except (TypeError, ValueError) as exc:
         raise MediaTemplateError(f"JSON invalido apos render: {exc}") from exc
-    if is_test and isinstance(payload, dict) and "test" not in payload:
-        payload["test"] = True
     return payload
 
 
@@ -1187,16 +1186,24 @@ def scrub_secret(value: Any, secret: str) -> str:
 
 
 def send_test_event(data: dict[str, Any]) -> dict[str, Any]:
-    """Envia um evento de TESTE (envelope com test=true) para os destinos ativos.
+    """Envia um evento de TESTE para os destinos ativos.
 
     Uso administrativo: NAO grava anomalia, NAO passa pelo detector e NAO aciona
     mitigacao. Reaproveita exatamente o mesmo envio dos eventos reais.
+
+    A chave "test" NAO e injetada: se o template do destino declarar
+    "test": {{test}}, ela vira true aqui (e false em producao); se nao declarar,
+    nao aparece no JSON.
+
+    O dicionario recebido vence o sample (inclusive valores None), para que o
+    chamador possa representar explicitamente "sem sensor" sem que o sample
+    invente um sensor.
     """
     # Contrato publico do evento de teste: sempre event_id=0 e status="test".
     payload_data: dict[str, Any] = dict(TEST_SAMPLE_EVENT)
     payload_data["event_id"] = 0
     payload_data["status"] = "test"
-    payload_data.update({key: value for key, value in dict(data or {}).items() if value is not None})
+    payload_data.update(dict(data or {}))
     results: list[dict[str, Any]] = []
     representative: Any = None
     severity = clean_text(payload_data.get("severity")) or "info"
