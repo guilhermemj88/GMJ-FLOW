@@ -31955,6 +31955,55 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     let mediaSensorsLoaded = false;
     let mediaDefaultPayloadTemplate = '';
     let mediaPayloadPlaceholders = [];
+    let mediaDefaultsPromise = null;
+
+    function applyMediaPayloadDefaults(payload) {
+      if (!payload || typeof payload !== 'object' || payload.__notModified) return false;
+      if (Array.isArray(payload.items)) mediaItems = payload.items;
+      if (Array.isArray(payload.sensors)) {
+        mediaSensors = payload.sensors;
+        mediaSensorsLoaded = true;
+      }
+      if (typeof payload.default_payload_template === 'string' && payload.default_payload_template.trim()) {
+        mediaDefaultPayloadTemplate = payload.default_payload_template;
+      }
+      if (Array.isArray(payload.payload_placeholders)) {
+        mediaPayloadPlaceholders = payload.payload_placeholders;
+      }
+      return Boolean(mediaDefaultPayloadTemplate);
+    }
+
+    async function ensureMediaDefaults() {
+      if (mediaDefaultPayloadTemplate) return mediaDefaultPayloadTemplate;
+      if (mediaDefaultsPromise) return mediaDefaultsPromise;
+      mediaDefaultsPromise = (async () => {
+        try {
+          applyMediaPayloadDefaults(await apiRequest('/api/media'));
+        } catch (error) {
+          /* tenta o fallback abaixo */
+        }
+        if (!mediaDefaultPayloadTemplate) {
+          try {
+            const preview = await apiRequest('/api/media/payload-template/preview', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ template: '' }),
+            });
+            if (typeof preview?.default_template === 'string' && preview.default_template.trim()) {
+              mediaDefaultPayloadTemplate = preview.default_template;
+            }
+          } catch (error) {
+            /* sem default disponivel */
+          }
+        }
+        return mediaDefaultPayloadTemplate;
+      })();
+      try {
+        return await mediaDefaultsPromise;
+      } finally {
+        mediaDefaultsPromise = null;
+      }
+    }
 
     async function loadMediaSensors() {
       if (mediaSensorsLoaded) return mediaSensors;
@@ -32037,17 +32086,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       const status = document.getElementById('mediaViewStatus');
       if (status) status.textContent = 'Carregando destinos…';
       const payload = await apiRequest('/api/media');
-      mediaItems = Array.isArray(payload?.items) ? payload.items : [];
-      if (Array.isArray(payload?.sensors)) {
-        mediaSensors = payload.sensors;
-        mediaSensorsLoaded = true;
-      }
-      if (typeof payload?.default_payload_template === 'string') {
-        mediaDefaultPayloadTemplate = payload.default_payload_template;
-      }
-      if (Array.isArray(payload?.payload_placeholders)) {
-        mediaPayloadPlaceholders = payload.payload_placeholders;
-      }
+      applyMediaPayloadDefaults(payload);
       renderMediaTable();
       if (status) {
         status.textContent = mediaItems.length
@@ -32085,6 +32124,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     }
 
     async function openMediaModal(item = null) {
+      await ensureMediaDefaults();
       mediaEditingId = item ? Number(item.id) : null;
       document.getElementById('mediaModalTitle').textContent = item ? 'Editar destino' : 'Novo webhook';
       document.getElementById('mediaName').value = item?.name || '';
@@ -32108,8 +32148,10 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       renderMediaSensors(item?.sensorIds || []);
       updateMediaSensorVisibility();
       const payloadTemplate = document.getElementById('mediaPayloadTemplate');
-      if (payloadTemplate) payloadTemplate.value = item?.payload_template || mediaDefaultPayloadTemplate || '';
-      setText('mediaPayloadStatus', '');
+      const customTemplate = item && typeof item.payload_template === 'string' ? item.payload_template.trim() : '';
+      const templateValue = customTemplate ? item.payload_template : mediaDefaultPayloadTemplate;
+      if (payloadTemplate) payloadTemplate.value = templateValue || '';
+      setText('mediaPayloadStatus', payloadTemplate && payloadTemplate.value ? '' : 'Não foi possível carregar o template padrão.');
       setText('mediaFormStatus', '');
       openModal('mediaModal');
     }
@@ -32117,10 +32159,38 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     function mediaPayloadTemplateValue() {
       const node = document.getElementById('mediaPayloadTemplate');
       const value = node ? node.value : '';
-      const trimmed = value.trim();
-      const defaultTrimmed = String(mediaDefaultPayloadTemplate || '').trim();
-      if (!trimmed || trimmed === defaultTrimmed) return '';
+      if (!value.trim()) return '';
+      if (mediaTemplateEquivalent(value, mediaDefaultPayloadTemplate)) return '';
       return value;
+    }
+
+    function stripInsignificantWhitespace(text) {
+      let output = '';
+      let inString = false;
+      let escaped = false;
+      for (const char of String(text || '')) {
+        if (inString) {
+          output += char;
+          if (escaped) escaped = false;
+          else if (char === '\\') escaped = true;
+          else if (char === '"') inString = false;
+          continue;
+        }
+        if (char === '"') {
+          inString = true;
+          output += char;
+          continue;
+        }
+        if (char === ' ' || char === '\t' || char === '\n' || char === '\r') continue;
+        output += char;
+      }
+      return output;
+    }
+
+    function mediaTemplateEquivalent(left, right) {
+      const normalizedLeft = stripInsignificantWhitespace(left);
+      const normalizedRight = stripInsignificantWhitespace(right);
+      return Boolean(normalizedLeft) && normalizedLeft === normalizedRight;
     }
 
     async function mediaPayloadPreview() {
@@ -32132,10 +32202,13 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       });
     }
 
-    function mediaPayloadRestore() {
+    async function mediaPayloadRestore() {
+      await ensureMediaDefaults();
       const node = document.getElementById('mediaPayloadTemplate');
-      if (node) node.value = mediaDefaultPayloadTemplate || '';
-      setText('mediaPayloadStatus', 'Template padrão restaurado. Salve para aplicar.');
+      if (node && mediaDefaultPayloadTemplate) node.value = mediaDefaultPayloadTemplate;
+      setText('mediaPayloadStatus', mediaDefaultPayloadTemplate
+        ? 'Template padrão restaurado. Salve para aplicar.'
+        : 'Não foi possível carregar o template padrão. Verifique a conexão e tente novamente.');
     }
 
     async function mediaPayloadValidate() {
@@ -32437,7 +32510,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       document.getElementById('mediaNewButton')?.addEventListener('click', () => openMediaModal(null).catch(error => setText('mediaViewStatus', `Falha: ${error.message}`)));
       document.getElementById('mediaSaveButton')?.addEventListener('click', () => saveMedia().catch(error => setText('mediaFormStatus', `Falha: ${error.message}`)));
       document.getElementById('mediaAllSensors')?.addEventListener('change', updateMediaSensorVisibility);
-      document.getElementById('mediaPayloadRestoreButton')?.addEventListener('click', mediaPayloadRestore);
+      document.getElementById('mediaPayloadRestoreButton')?.addEventListener('click', () => mediaPayloadRestore().catch(error => setText('mediaPayloadStatus', `Erro: ${error.message}`)));
       document.getElementById('mediaPayloadFormatButton')?.addEventListener('click', () => mediaPayloadFormat().catch(error => setText('mediaPayloadStatus', `Erro: ${error.message}`)));
       document.getElementById('mediaPayloadValidateButton')?.addEventListener('click', () => mediaPayloadValidate().catch(error => setText('mediaPayloadStatus', `Erro: ${error.message}`)));
       document.getElementById('mediaPayloadTestButton')?.addEventListener('click', () => mediaPayloadSendTest().catch(error => setText('mediaPayloadStatus', `Falha: ${error.message}`)));
