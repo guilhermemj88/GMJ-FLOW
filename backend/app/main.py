@@ -51,6 +51,7 @@ from app.api.threat_engine import api_security_router, router as threat_engine_r
 from app.services.humanize import format_bits_per_second, format_bytes, format_flows, format_packets, format_packets_per_second, format_pdf_metric
 from app.services.clickhouse import fetch_learning_traffic_series
 from app.services.sqlite_managed import open_managed
+from app.services import media_dispatch
 from app.services.peak_hunter import ensure_peak_analysis_db
 from app.services.peak_hunter_runner import ensure_peak_hunter_automation_db, mark_peak_hunter_scheduler_started, mark_peak_hunter_scheduler_stopped
 from app.services.peak_hunter_auto import run_peak_hunter_cycle
@@ -251,6 +252,7 @@ from app.services.grafana_api import (
     correlation_id as grafana_correlation_id,
     filter_anomaly_history as filter_grafana_anomaly_history,
     is_grafana_api_path,
+    parse_utc_timestamp,
     service_document as grafana_api_service_document,
     validate_mitigation_filters as validate_grafana_mitigation_filters,
     validate_ranking_request as validate_grafana_ranking_request,
@@ -1505,6 +1507,27 @@ class AttackVectorTestPayload(BaseModel):
     min_duration_seconds: int | None = Field(None, ge=0, le=86400)
 
 
+MEDIA_DEFAULT_EVENT_TYPES = ["anomaly_detected"]
+
+
+class MediaIntegrationPayload(BaseModel):
+    name: str
+    type: str = "webhook"
+    url: str
+    active: bool = True
+    event_types: list[str] = Field(default_factory=lambda: list(MEDIA_DEFAULT_EVENT_TYPES))
+    minimum_severity: str = "info"
+    timeout_seconds: float = 5.0
+    secret: str = ""
+    secret_header: str = "X-GMJ-Flow-Token"
+    # Filtro de sensores: aceita snake_case (padrao da API) e camelCase (contrato pedido).
+    all_sensors: bool = True
+    sensor_ids: list[int] = Field(default_factory=list)
+    allSensors: bool | None = None
+    sensorIds: list[int] | None = None
+    payload_template: str = ""
+
+
 class IpZonePayload(BaseModel):
     name: str
     description: str = ""
@@ -2206,6 +2229,204 @@ def sqlite_table_exists(conn: sqlite3.Connection, table: str) -> bool:
         (table,),
     ).fetchone()
     return row is not None
+
+
+def ensure_media_db(conn: sqlite3.Connection) -> None:
+    """Midia / alertas por webhook: tabelas aditivas e idempotentes."""
+
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS media_integrations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            type TEXT NOT NULL DEFAULT 'webhook',
+            url TEXT NOT NULL,
+            active INTEGER NOT NULL DEFAULT 1,
+            all_sensors INTEGER NOT NULL DEFAULT 1,
+            payload_template TEXT,
+            event_types TEXT NOT NULL DEFAULT '["anomaly_detected"]',
+            minimum_severity TEXT NOT NULL DEFAULT 'info',
+            timeout_seconds REAL NOT NULL DEFAULT 5,
+            secret_encrypted TEXT NOT NULL DEFAULT '',
+            secret_header TEXT NOT NULL DEFAULT 'X-GMJ-Flow-Token',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            last_test_at TEXT,
+            last_test_status TEXT NOT NULL DEFAULT '',
+            last_test_http_status INTEGER,
+            last_test_duration_ms INTEGER,
+            last_test_error TEXT NOT NULL DEFAULT ''
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS media_delivery_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            media_id INTEGER NOT NULL,
+            event_id INTEGER,
+            event_type TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT '',
+            http_status INTEGER,
+            duration_ms INTEGER,
+            error TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_media_integrations_active ON media_integrations (active, type)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_media_delivery_logs_media ON media_delivery_logs (media_id, id DESC)")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS media_destination_sensors (
+            media_id INTEGER NOT NULL,
+            sensor_id INTEGER NOT NULL,
+            PRIMARY KEY (media_id, sensor_id)
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_media_destination_sensors_sensor ON media_destination_sensors (sensor_id)"
+    )
+    # Destinos legados (criados antes do filtro) permanecem com all_sensors=1 e
+    # continuam recebendo todos os sensores. A coluna e aditiva e idempotente.
+    ensure_sqlite_column(conn, "media_integrations", "all_sensors", "all_sensors INTEGER NOT NULL DEFAULT 1")
+    # payload_template NULL => usa o template padrao legado (compatibilidade).
+    ensure_sqlite_column(conn, "media_integrations", "payload_template", "payload_template TEXT")
+
+
+def media_row_to_dict(row: sqlite3.Row | dict[str, Any], sensor_ids: Any = None) -> dict[str, Any]:
+    """Serializa um destino. O segredo NUNCA sai daqui."""
+    item = dict(row)
+    return {
+        "id": int(item["id"]),
+        "name": clean_text(item.get("name")),
+        "type": clean_text(item.get("type")) or media_dispatch.MEDIA_TYPE_WEBHOOK,
+        "url": clean_text(item.get("url")),
+        "active": bool(int(item.get("active") or 0)),
+        "allSensors": media_dispatch.destination_all_sensors(item),
+        "sensorIds": sorted({int(value) for value in (sensor_ids or [])}),
+        "payload_template": clean_text(item.get("payload_template")),
+        "event_types": media_dispatch.normalize_event_types(item.get("event_types")),
+        "minimum_severity": media_dispatch.normalize_severity(item.get("minimum_severity")),
+        "timeout_seconds": media_dispatch.normalize_timeout(item.get("timeout_seconds")),
+        "secret_header": clean_text(item.get("secret_header")) or "X-GMJ-Flow-Token",
+        "has_secret": bool(clean_text(item.get("secret_encrypted"))),
+        "created_at": clean_text(item.get("created_at")),
+        "updated_at": clean_text(item.get("updated_at")),
+        "last_test_at": clean_text(item.get("last_test_at")),
+        "last_test_status": clean_text(item.get("last_test_status")),
+        "last_test_http_status": item.get("last_test_http_status"),
+        "last_test_duration_ms": item.get("last_test_duration_ms"),
+        "last_test_error": clean_text(item.get("last_test_error")),
+    }
+
+
+def media_payload_all_sensors(payload: MediaIntegrationPayload) -> bool:
+    """Resolve allSensors (camelCase) com fallback para all_sensors (snake_case)."""
+    camel = getattr(payload, "allSensors", None)
+    if camel is not None:
+        return bool(camel)
+    return bool(getattr(payload, "all_sensors", True))
+
+
+def media_payload_sensor_ids(payload: MediaIntegrationPayload) -> list[int]:
+    """Resolve sensorIds (camelCase) com fallback para sensor_ids (snake_case)."""
+    camel = getattr(payload, "sensorIds", None)
+    raw = camel if camel is not None else getattr(payload, "sensor_ids", None)
+    return media_dispatch.normalize_sensor_ids(raw)
+
+
+def media_destination_sensor_values(conn: sqlite3.Connection, payload: MediaIntegrationPayload) -> tuple[bool, list[int]]:
+    """Valida a selecao de sensores do destino e devolve (all_sensors, sensor_ids)."""
+    all_sensors = media_payload_all_sensors(payload)
+    sensor_ids = media_payload_sensor_ids(payload)
+    if not all_sensors and not sensor_ids:
+        raise HTTPException(
+            status_code=400,
+            detail="Selecione ao menos um sensor ou marque 'Todos os sensores'.",
+        )
+    if sensor_ids:
+        placeholders = ", ".join("?" for _ in sensor_ids)
+        existing = {
+            int(row["id"])
+            for row in conn.execute(
+                f"SELECT id FROM sensors WHERE id IN ({placeholders})", tuple(sensor_ids)
+            ).fetchall()
+        }
+        missing = [sensor_id for sensor_id in sensor_ids if sensor_id not in existing]
+        if missing:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Sensores inexistentes: {', '.join(str(sensor_id) for sensor_id in missing)}",
+            )
+    return all_sensors, sensor_ids
+
+
+def store_media_sensors(conn: sqlite3.Connection, media_id: int, sensor_ids: Any) -> None:
+    """Substitui a associacao destino->sensores de forma atomica (mesma tx)."""
+    conn.execute("DELETE FROM media_destination_sensors WHERE media_id = ?", (int(media_id),))
+    for sensor_id in media_dispatch.normalize_sensor_ids(sensor_ids):
+        conn.execute(
+            "INSERT OR IGNORE INTO media_destination_sensors (media_id, sensor_id) VALUES (?, ?)",
+            (int(media_id), int(sensor_id)),
+        )
+
+
+def media_sensor_ids(conn: sqlite3.Connection, media_id: int) -> list[int]:
+    rows = conn.execute(
+        "SELECT sensor_id FROM media_destination_sensors WHERE media_id = ? ORDER BY sensor_id",
+        (int(media_id),),
+    ).fetchall()
+    return [int(row["sensor_id"]) for row in rows]
+
+
+def media_integration_values(
+    payload: MediaIntegrationPayload,
+    existing: sqlite3.Row | None,
+    now: str,
+    *,
+    all_sensors: bool = True,
+) -> dict[str, Any]:
+    name = clean_text(payload.name)
+    if not name:
+        raise HTTPException(status_code=400, detail="Nome da midia e obrigatorio")
+    media_type = clean_text(payload.type) or media_dispatch.MEDIA_TYPE_WEBHOOK
+    if media_type not in media_dispatch.MEDIA_TYPES:
+        raise HTTPException(status_code=400, detail=f"Tipo de midia nao suportado: {media_type}")
+    try:
+        url = media_dispatch.validate_webhook_url(payload.url)
+    except media_dispatch.MediaUrlError as exc:
+        raise HTTPException(status_code=400, detail=f"URL recusada pela politica de seguranca: {exc}") from exc
+    event_types = media_dispatch.normalize_event_types(payload.event_types)
+    if not event_types:
+        raise HTTPException(status_code=400, detail="Selecione ao menos um evento habilitado")
+    payload_template = clean_text(getattr(payload, "payload_template", ""))
+    if payload_template:
+        try:
+            media_dispatch.validate_payload_template(payload_template)
+        except media_dispatch.MediaTemplateError as exc:
+            raise HTTPException(status_code=400, detail=f"Payload JSON invalido: {exc}") from exc
+    values: dict[str, Any] = {
+        "name": name,
+        "type": media_type,
+        "url": url,
+        "active": 1 if payload.active else 0,
+        "all_sensors": 1 if all_sensors else 0,
+        "payload_template": payload_template or None,
+        "event_types": json.dumps(event_types),
+        "minimum_severity": media_dispatch.normalize_severity(payload.minimum_severity),
+        "timeout_seconds": media_dispatch.normalize_timeout(payload.timeout_seconds),
+        "secret_header": clean_text(payload.secret_header) or "X-GMJ-Flow-Token",
+        "updated_at": now,
+    }
+    incoming_secret = clean_text(payload.secret)
+    if incoming_secret:
+        values["secret_encrypted"] = media_dispatch.encrypt_secret(incoming_secret)
+    elif existing is None:
+        values["secret_encrypted"] = ""
+    return values
 
 
 def sqlite_insert_dict(conn: sqlite3.Connection, table: str, values: dict[str, Any]) -> sqlite3.Cursor:
@@ -3513,6 +3734,7 @@ def ensure_ip_zone_detection_db(conn: sqlite3.Connection) -> None:
             target_ip TEXT,
             target_cidr TEXT,
             target_role TEXT NOT NULL DEFAULT '',
+            sensor_id INTEGER REFERENCES sensors(id) ON DELETE SET NULL,
             scope_type TEXT NOT NULL DEFAULT '',
             invalid_scope INTEGER NOT NULL DEFAULT 0,
             protocol TEXT,
@@ -3554,6 +3776,7 @@ def ensure_ip_zone_detection_db(conn: sqlite3.Connection) -> None:
     ensure_sqlite_column(conn, "security_anomalies", "auto_mitigation_details_json", "auto_mitigation_details_json TEXT NOT NULL DEFAULT '{}'")
     ensure_sqlite_column(conn, "security_anomalies", "auto_mitigation_updated_at", "auto_mitigation_updated_at TEXT NOT NULL DEFAULT ''")
     ensure_sqlite_column(conn, "security_anomalies", "acknowledged_at", "acknowledged_at TEXT")
+    ensure_sqlite_column(conn, "security_anomalies", "sensor_id", "sensor_id INTEGER")
     ensure_sqlite_column(conn, "security_anomalies", "ended_at", "ended_at TEXT")
     detection_rule_columns = {
         "display_name": "display_name TEXT NOT NULL DEFAULT ''",
@@ -4711,6 +4934,7 @@ def ensure_sensor_db() -> None:
         ensure_threat_intel_schema(conn)
         ensure_behavioral_schema(conn)
         ensure_threat_policy_schema(conn)
+        ensure_media_db(conn)
         user_count = conn.execute("SELECT COUNT(*) AS count FROM users").fetchone()["count"]
         if int(user_count or 0) == 0:
             initial_password = os.getenv("GMJFLOW_INITIAL_ADMIN_PASSWORD", "")
@@ -4783,6 +5007,7 @@ def startup() -> None:
     start_bgp_status_check_thread()
     start_automatic_mitigation_thread()
     start_anomaly_detection_thread()
+    media_dispatch.start_media_worker()
     start_asn_resolver_thread()
     start_peak_hunter_runner_thread()
     start_dashboard_cache_prewarm()
@@ -4792,6 +5017,7 @@ def startup() -> None:
 def shutdown() -> None:
     DASHBOARD_CACHE.stop_monitor()
     THREAT_INTEL_MANAGER.stop()
+    media_dispatch.stop_media_worker()
     BEHAVIORAL_THREAT_RUNTIME.stop()
     SNMP_POLL_STOP.set()
     DATABASE_RETENTION_STOP.set()
@@ -16432,9 +16658,12 @@ def resolve_mitigation_target_connectors(
             connectors = []
             resolution_error = "origin_not_in_persisted_zone"
         else:
+            # GRAFANA/SENSOR: a mitigacao usa SEMPRE o sensor de ESCOPO da regra.
+            # O sensor detectado passou a ser persistido em anomaly_events.sensor_id
+            # e nao pode alterar a selecao de conector.
             sensor_connectors = sensor_origin_bgp_connectors(
                 conn,
-                candidate.get("sensor_id") or profile.get("sensor_id"),
+                mitigation_scope_sensor_id(conn, candidate) or profile.get("sensor_id"),
             )
             if sensor_connectors:
                 connectors = set_mitigation_connector_resolution(
@@ -28669,6 +28898,258 @@ def withdraw_bgp_announcement(request: Request, announcement_id: int):
     return update_bgp_announcement_status(request, announcement_id, "withdrawn", "withdrawn", "Retirada solicitada pelo operador.")
 
 
+# Midia / Alertas por Webhook -------------------------------------------------
+class MediaTestEventPayload(BaseModel):
+    target_ip: str = "100.64.17.245"
+    target_port: int = 443
+    protocol: str = "udp"
+    vector_name: str = "TEST_UDP_FLOOD"
+    display_name: str = "Teste UDP Flood"
+    source_name: str = "Evento manual de teste"
+    severity: str = "critical"
+    direction: str = "receives"
+    pps: float = 420000
+    bps: float = 3800000000
+    sensor_id: int | None = None
+
+
+class MediaTestTelegramPayload(BaseModel):
+    bot_token: str
+    chat_id: str
+    text: str = ""
+
+
+class MediaPayloadTemplatePayload(BaseModel):
+    template: str = ""
+
+
+@app.post("/api/media/test-event")
+def media_test_event(payload: MediaTestEventPayload, request: Request):
+    """Envia um evento FALSO (test=true) para os webhooks ativos de anomaly_detected.
+
+    Nao grava anomalia, nao passa pelo detector e nao aciona mitigacao.
+    """
+    require_permission(request, "settings.manage")
+    ensure_sensor_db()
+    data = {
+        "event_id": 0,
+        "target_ip": clean_text(payload.target_ip),
+        "target_port": int(payload.target_port or 0),
+        "protocol": clean_text(payload.protocol).lower(),
+        "vector_name": clean_text(payload.vector_name),
+        "display_name": clean_text(payload.display_name),
+        "source_name": clean_text(payload.source_name),
+        "severity": media_dispatch.normalize_severity(payload.severity),
+        "direction": clean_text(payload.direction),
+        "status": "test",
+        "pps": float(payload.pps or 0),
+        "bps": float(payload.bps or 0),
+        "sensor_id": int(getattr(payload, "sensor_id", None) or 0) or None,
+    }
+    return media_dispatch.send_test_event(data)
+
+
+@app.post("/api/media/test-telegram")
+def media_test_telegram(payload: MediaTestTelegramPayload, request: Request):
+    """Ferramenta administrativa: envia UMA mensagem pela Bot API do Telegram.
+
+    O token nao e persistido, nao e registrado em log e nao volta na resposta.
+    """
+    require_permission(request, "settings.manage")
+    token = clean_text(payload.bot_token)
+    chat_id = clean_text(payload.chat_id)
+    if not token or ":" not in token:
+        raise HTTPException(status_code=400, detail="Bot token invalido")
+    if not chat_id:
+        raise HTTPException(status_code=400, detail="Chat ID obrigatorio")
+    result = media_dispatch.send_telegram_message(token, chat_id, payload.text or "")
+    return {
+        "ok": bool(result.get("ok")),
+        "http_status": int(result.get("http_status") or 0),
+        "duration_ms": int(result.get("duration_ms") or 0),
+        "error": clean_text(result.get("error")),
+        "chat_id": chat_id,
+    }
+
+
+@app.post("/api/media/payload-template/preview")
+def preview_media_payload_template(payload: MediaPayloadTemplatePayload, request: Request):
+    """Valida e formata um template de payload JSON, sem salvar nada.
+
+    Usa exatamente o mesmo renderizador do dispatcher. Renderiza com dados de
+    exemplo para garantir que o template nao quebra em producao.
+    """
+    require_permission(request, "settings.manage")
+    template = clean_text(payload.template) or media_dispatch.DEFAULT_PAYLOAD_TEMPLATE
+    try:
+        rendered = media_dispatch.validate_payload_template(template)
+        formatted = media_dispatch.format_payload_template(template)
+    except media_dispatch.MediaTemplateError as exc:
+        return {"ok": False, "error": str(exc), "template": template, "preview": None}
+    try:
+        preview = json.loads(rendered)
+    except (TypeError, ValueError):
+        preview = None
+    return {
+        "ok": True,
+        "error": "",
+        "template": formatted,
+        "preview": preview,
+        "placeholders": list(media_dispatch.MEDIA_PLACEHOLDERS),
+        "default_template": media_dispatch.DEFAULT_PAYLOAD_TEMPLATE,
+    }
+
+
+@app.get("/api/media")
+def list_media(request: Request):
+    require_permission(request, "settings.view")
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        rows = conn.execute("SELECT * FROM media_integrations ORDER BY active DESC, name, id").fetchall()
+        sensor_map = media_dispatch.load_destination_sensor_map(conn)
+        sensor_rows = conn.execute("SELECT id, name, exporter_ip, active FROM sensors ORDER BY name, id").fetchall()
+        return {
+            "items": [media_row_to_dict(row, sensor_map.get(int(row["id"]))) for row in rows],
+            # Inventario para os checkboxes do modal "Editar destino". Vem no
+            # proprio GET /api/media (settings.view) para nao exigir sensors.view.
+            "sensors": [
+                {
+                    "id": int(sensor["id"]),
+                    "name": clean_text(sensor["name"]),
+                    "exporter_ip": clean_text(sensor["exporter_ip"]),
+                    "active": bool(int(sensor["active"] or 0)),
+                }
+                for sensor in sensor_rows
+            ],
+            "event_types": list(media_dispatch.MEDIA_EVENT_TYPES),
+            "types": list(media_dispatch.MEDIA_TYPES),
+            "severities": list(media_dispatch.MEDIA_SEVERITY_ORDER),
+            "default_payload_template": media_dispatch.DEFAULT_PAYLOAD_TEMPLATE,
+            "payload_placeholders": list(media_dispatch.MEDIA_PLACEHOLDERS),
+            "pending_jobs": media_dispatch.pending_jobs(),
+            "last_dispatch": media_dispatch.last_dispatch(),
+        }
+
+
+@app.post("/api/media", status_code=201)
+def create_media(payload: MediaIntegrationPayload, request: Request):
+    require_permission(request, "settings.manage")
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        now = utc_now_iso()
+        all_sensors, sensor_ids = media_destination_sensor_values(conn, payload)
+        values = media_integration_values(payload, None, now, all_sensors=all_sensors)
+        values["created_at"] = now
+        cursor = sqlite_insert_dict(conn, "media_integrations", values)
+        media_id = int(cursor.lastrowid)
+        store_media_sensors(conn, media_id, sensor_ids)
+        conn.commit()
+        row = conn.execute("SELECT * FROM media_integrations WHERE id = ?", (media_id,)).fetchone()
+        return media_row_to_dict(row, media_sensor_ids(conn, media_id))
+
+
+@app.put("/api/media/{media_id}")
+def update_media(media_id: int, payload: MediaIntegrationPayload, request: Request):
+    require_permission(request, "settings.manage")
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        existing = conn.execute("SELECT * FROM media_integrations WHERE id = ?", (media_id,)).fetchone()
+        if existing is None:
+            raise HTTPException(status_code=404, detail="Midia nao encontrada")
+        all_sensors, sensor_ids = media_destination_sensor_values(conn, payload)
+        values = media_integration_values(payload, existing, utc_now_iso(), all_sensors=all_sensors)
+        assignments = ", ".join(f"{column} = ?" for column in values)
+        conn.execute(
+            f"UPDATE media_integrations SET {assignments} WHERE id = ?",
+            (*values.values(), media_id),
+        )
+        store_media_sensors(conn, media_id, sensor_ids)
+        conn.commit()
+        row = conn.execute("SELECT * FROM media_integrations WHERE id = ?", (media_id,)).fetchone()
+        return media_row_to_dict(row, media_sensor_ids(conn, media_id))
+
+
+@app.post("/api/media/{media_id}/toggle")
+def toggle_media(media_id: int, request: Request):
+    require_permission(request, "settings.manage")
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        row = conn.execute("SELECT * FROM media_integrations WHERE id = ?", (media_id,)).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Midia nao encontrada")
+        active = 0 if int(row["active"] or 0) else 1
+        conn.execute(
+            "UPDATE media_integrations SET active = ?, updated_at = ? WHERE id = ?",
+            (active, utc_now_iso(), media_id),
+        )
+        conn.commit()
+        updated = conn.execute("SELECT * FROM media_integrations WHERE id = ?", (media_id,)).fetchone()
+        return media_row_to_dict(updated, media_sensor_ids(conn, media_id))
+
+
+@app.delete("/api/media/{media_id}")
+def delete_media(media_id: int, request: Request):
+    require_permission(request, "settings.manage")
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        row = conn.execute("SELECT id FROM media_integrations WHERE id = ?", (media_id,)).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Midia nao encontrada")
+        conn.execute("DELETE FROM media_delivery_logs WHERE media_id = ?", (media_id,))
+        conn.execute("DELETE FROM media_destination_sensors WHERE media_id = ?", (media_id,))
+        conn.execute("DELETE FROM media_integrations WHERE id = ?", (media_id,))
+        conn.commit()
+        return {"ok": True, "deleted": media_id}
+
+
+@app.post("/api/media/{media_id}/test")
+def test_media(media_id: int, request: Request):
+    """Envia payload de exemplo e devolve status HTTP, duracao e erro."""
+    require_permission(request, "settings.manage")
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        row = conn.execute("SELECT * FROM media_integrations WHERE id = ?", (media_id,)).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Midia nao encontrada")
+        result = media_dispatch.test_media_integration(row)
+        conn.execute(
+            """
+            UPDATE media_integrations
+            SET last_test_at = ?, last_test_status = ?, last_test_http_status = ?,
+                last_test_duration_ms = ?, last_test_error = ?
+            WHERE id = ?
+            """,
+            (
+                utc_now_iso(),
+                "success" if result.get("ok") else "error",
+                int(result.get("http_status") or 0),
+                int(result.get("duration_ms") or 0),
+                clean_text(result.get("error"))[:500],
+                media_id,
+            ),
+        )
+        conn.commit()
+        return {"id": media_id, **result}
+
+
+@app.get("/api/media/{media_id}/logs")
+def media_logs(media_id: int, request: Request, limit: int = Query(20, ge=1, le=200)):
+    require_permission(request, "settings.view")
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, media_id, event_id, event_type, status, http_status, duration_ms, error, created_at
+            FROM media_delivery_logs
+            WHERE media_id = ?
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (media_id, limit),
+        ).fetchall()
+        return {"items": [dict(row) for row in rows]}
+
+
 @app.get("/api/ip-zones")
 def list_ip_zones():
     ensure_sensor_db()
@@ -31120,6 +31601,8 @@ def query_detection_rule_candidates(
                 {protocol_expr} AS protocol,
                 {dst_port_expr} AS dst_port,
                 toUInt16(src_port) AS src_port,
+                toString(exporter_ip) AS detected_exporter_ip_raw,
+                toString(sensor) AS detected_sensor_name_raw,
                 toFloat64(bytes) AS byte_value,
                 toFloat64(packets) AS packet_value,
                 toFloat64(flow_count) AS flow_value,
@@ -31150,7 +31633,10 @@ def query_detection_rule_candidates(
                 uniqExact(unique_dst_port_value) AS unique_dst_ports,
                 uniqExact(unique_src_port_value) AS unique_src_ports,
                 min(flow_time) AS first_seen,
-                max(flow_time) AS last_seen
+                max(flow_time) AS last_seen,
+                uniqExact(detected_exporter_ip_raw) AS detected_exporter_count,
+                any(detected_exporter_ip_raw) AS detected_exporter_ip,
+                any(detected_sensor_name_raw) AS detected_sensor_name
             FROM base
             GROUP BY {group_columns}
         )
@@ -31175,7 +31661,10 @@ def query_detection_rule_candidates(
             unique_src_ports,
             first_seen,
             last_seen,
-            {metric_alias} AS metric_value
+            {metric_alias} AS metric_value,
+            detected_exporter_count,
+            detected_exporter_ip,
+            detected_sensor_name
         FROM grouped
         ORDER BY metric_value DESC
         LIMIT {{limit:UInt32}}
@@ -31267,6 +31756,9 @@ def query_detection_rule_candidates(
             "template_id": int(template["id"]),
             "template_name": template["name"],
             "sensor_id": sensor_id,
+            "detected_exporter_count": int(row.get("detected_exporter_count") or 0),
+            "detected_exporter_ip": clean_text(row.get("detected_exporter_ip")),
+            "detected_sensor_name": clean_text(row.get("detected_sensor_name") or row.get("sensor")),
             "rule_id": int(rule["id"]),
             "rule_name": rule["vector"],
             "display_name": rule.get("display_name") or automatic_vector_display_name(rule["vector"]),
@@ -31439,6 +31931,7 @@ def upsert_security_anomaly(conn: sqlite3.Connection, candidate: dict[str, Any])
         scope = internal_ip_scope_fields(candidate.get("domain"), candidate.get("direction"), candidate.get("internal_ip") or candidate.get("src_ip") or candidate.get("dst_ip"))
         candidate = {**candidate, **scope}
     dedupe_key = security_anomaly_dedupe_key(candidate)
+    detected_sensor = resolve_detected_sensor(conn, candidate)
     existing = conn.execute(
         """
         SELECT *
@@ -31508,6 +32001,7 @@ def upsert_security_anomaly(conn: sqlite3.Connection, candidate: dict[str, Any])
         "mitigation_reason": candidate.get("mitigation_reason") or "",
         "traffic_accounting": candidate.get("traffic_accounting") or {},
         "detection": detection_state,
+        "sensor_detection": detected_sensor,
     }
     source_details.update(detection_fields_from_source_details(source_details))
     values = (
@@ -31552,7 +32046,7 @@ def upsert_security_anomaly(conn: sqlite3.Connection, candidate: dict[str, Any])
         json.dumps(source_details, sort_keys=True, default=str),
     )
     if existing is None:
-        sqlite_insert_dict(
+        cursor = sqlite_insert_dict(
             conn,
             "security_anomalies",
             {
@@ -31595,10 +32089,12 @@ def upsert_security_anomaly(conn: sqlite3.Connection, candidate: dict[str, Any])
                 "source_id": values[36],
                 "source_name": values[37],
                 "source_details_json": values[38],
+                "sensor_id": detected_sensor["detected_sensor_id"],
                 "created_at": now,
                 "updated_at": now,
             },
         )
+        media_dispatch.track_created("security_anomaly", int(cursor.lastrowid or 0))
         return "created"
     conn.execute(
         """
@@ -31642,10 +32138,11 @@ def upsert_security_anomaly(conn: sqlite3.Connection, candidate: dict[str, Any])
             source_id = ?,
             source_name = ?,
             source_details_json = ?,
-            updated_at = ?
+            updated_at = ?,
+            sensor_id = ?
         WHERE id = ?
         """,
-        (*values, now, int(existing["id"])),
+        (*values, now, detected_sensor["detected_sensor_id"], int(existing["id"])),
     )
     return "updated"
 
@@ -32095,6 +32592,7 @@ def detection_candidates_payload(
                 action = upsert_security_anomaly(conn, item)
                 anomaly_actions[action] = anomaly_actions.get(action, 0) + 1
             conn.commit()
+            media_dispatch.flush_pending_created(conn)
 
     return {
         "start": iso(start_dt),
@@ -34153,7 +34651,10 @@ def query_vector_recent_traffic(
             max(flow_time) AS last_seen_at,
             {corrected_sum_expr("bytes", rate_expr)} * 8 / {{seconds:Float64}} AS bits_s,
             {corrected_sum_expr("packets", rate_expr)} / {{seconds:Float64}} AS packets_s,
-            sum(flow_count) / {{seconds:Float64}} AS flows_s
+            sum(flow_count) / {{seconds:Float64}} AS flows_s,
+            uniqExact(toString(exporter_ip)) AS detected_exporter_count,
+            any(toString(exporter_ip)) AS detected_exporter_ip,
+            any(toString(sensor)) AS detected_sensor_name
         FROM flow_raw
         WHERE {where}
         GROUP BY target_ip
@@ -34514,7 +35015,9 @@ def query_udp_many_internal_to_same_dst_port(
                 max(flow_time) AS last_seen_at,
                 {corrected_sum_expr("bytes", rate_expr)} * 8 / {{seconds:Float64}} AS bits_s,
                 {corrected_sum_expr("packets", rate_expr)} / {{seconds:Float64}} AS packets_s,
-                sum(flow_count) / {{seconds:Float64}} AS flows_s
+                sum(flow_count) / {{seconds:Float64}} AS flows_s,
+                uniqExact(toString(exporter_ip)) AS detected_exporter_count,
+                any(toString(exporter_ip)) AS detected_exporter_ip
             FROM flow_raw
             WHERE {where}
             GROUP BY target_ip, target_port, sensor, output_if
@@ -34665,7 +35168,9 @@ def query_udp_download_to_client(
                 max(flow_time) AS last_seen_at,
                 {corrected_sum_expr("bytes", rate_expr)} * 8 / {{seconds:Float64}} AS bits_s,
                 {corrected_sum_expr("packets", rate_expr)} / {{seconds:Float64}} AS packets_s,
-                sum(flow_count) / {{seconds:Float64}} AS flows_s
+                sum(flow_count) / {{seconds:Float64}} AS flows_s,
+                uniqExact(toString(exporter_ip)) AS detected_exporter_count,
+                any(toString(exporter_ip)) AS detected_exporter_ip
             FROM flow_raw
             WHERE {where}
             GROUP BY target_ip, target_port, sensor, input_if
@@ -34920,6 +35425,94 @@ def query_udp_special_sample_rows(
         item["decoder"] = classify_flow_decoder(item)
         rows.append(item)
     return rows
+
+
+def normalize_exporter_ip(value: Any) -> str:
+    """Normaliza IPv4-mapped IPv6: ::ffff:45.163.144.1 -> 45.163.144.1."""
+    text = clean_text(value)
+    if not text:
+        return ""
+    if text.lower().startswith("::ffff:") and "." in text[7:]:
+        return text[7:]
+    return text
+
+
+def resolve_detected_sensor(conn: sqlite3.Connection, source: dict[str, Any]) -> dict[str, Any]:
+    """Resolve o sensor REAL que originou o trafego (nunca o sensor de escopo da regra).
+
+    single     -> um exporter no agrupamento e correspondencia inequivoca em sensors
+    multi      -> mais de um exporter no agrupamento
+    unresolved -> nenhum dado, exporter desconhecido ou correspondencia ambigua
+    """
+    result = {
+        "detected_sensor_id": None,
+        "detected_sensor_name": "",
+        "detected_exporter_ip": "",
+        "detected_exporter_count": 0,
+        "sensor_resolution": "unresolved",
+    }
+    try:
+        exporter_ip = normalize_exporter_ip(source.get("detected_exporter_ip"))
+        sensor_name = clean_text(source.get("detected_sensor_name") or source.get("sensor"))
+        raw_count = source.get("detected_exporter_count")
+        if raw_count in (None, ""):
+            count = 1 if exporter_ip else 0
+        else:
+            count = int(raw_count)
+        result["detected_exporter_count"] = count
+        if not exporter_ip and not sensor_name:
+            result["sensor_resolution"] = "unresolved" if count == 0 else "multi"
+            return result
+        if count > 1:
+            result["sensor_resolution"] = "multi"
+            return result
+        sensor = None
+        if exporter_ip:
+            rows = conn.execute(
+                "SELECT id, name, exporter_ip FROM sensors WHERE exporter_ip = ? LIMIT 2",
+                (exporter_ip,),
+            ).fetchall()
+            if len(rows) == 1:
+                sensor = rows[0]
+        if sensor is None and sensor_name:
+            rows = conn.execute(
+                "SELECT id, name, exporter_ip FROM sensors WHERE name = ? LIMIT 2",
+                (sensor_name,),
+            ).fetchall()
+            if len(rows) == 1:
+                sensor = rows[0]
+        if sensor is None:
+            return result
+        result["detected_sensor_id"] = int(sensor["id"])
+        result["detected_sensor_name"] = clean_text(sensor["name"])
+        result["detected_exporter_ip"] = normalize_exporter_ip(sensor["exporter_ip"]) or exporter_ip
+        result["sensor_resolution"] = "single"
+    except Exception as exc:
+        logger.debug("Falha ao resolver sensor detectado: %s", exc)
+    return result
+
+
+def mitigation_scope_sensor_id(conn: sqlite3.Connection, candidate: dict[str, Any]) -> int | None:
+    """Sensor de ESCOPO da regra (o que a mitigacao sempre usou), nunca o detectado no trafego."""
+    event = mitigation_raw_anomaly(candidate) or candidate
+    try:
+        rule_id = int_or_none(event.get("detection_template_rule_id") or candidate.get("rule_id"))
+        if rule_id is not None and sqlite_table_exists(conn, "detection_template_rules"):
+            row = conn.execute(
+                "SELECT sensor_id FROM detection_template_rules WHERE id = ? LIMIT 1", (rule_id,)
+            ).fetchone()
+            if row is not None:
+                return int_or_none(row["sensor_id"])
+        vector_id = int_or_none(event.get("attack_vector_id") or candidate.get("attack_vector_id"))
+        if vector_id is not None and sqlite_table_exists(conn, "attack_vectors"):
+            row = conn.execute(
+                "SELECT sensor_id FROM attack_vectors WHERE id = ? LIMIT 1", (vector_id,)
+            ).fetchone()
+            if row is not None:
+                return int_or_none(row["sensor_id"])
+    except Exception as exc:
+        logger.debug("Falha ao resolver sensor de escopo da regra: %s", exc)
+    return None
 
 
 def anomaly_dedupe_key(vector: dict[str, Any], target_ip: str) -> str:
@@ -35227,6 +35820,7 @@ def upsert_anomaly_event(
     top_packets = int(traffic.get("top_packets") or 0)
     top_bytes = int(traffic.get("top_bytes") or 0)
     now = iso(end_dt)
+    detected_sensor = resolve_detected_sensor(conn, traffic)
     dedupe_key = anomaly_dedupe_key(vector, target_ip)
     if udp_vector_name(vector) in UDP_SPECIAL_VECTORS:
         dedupe_key = "|".join(
@@ -35264,7 +35858,7 @@ def upsert_anomaly_event(
             "anomaly_events",
             {
                 "attack_vector_id": vector["id"],
-                "sensor_id": vector.get("sensor_id"),
+                "sensor_id": detected_sensor["detected_sensor_id"],
                 "interface_if_index": vector.get("interface_if_index"),
                 "target_ip": scope["target_ip"],
                 "target_cidr": scope["target_cidr"] or vector.get("target_cidr"),
@@ -35314,6 +35908,7 @@ def upsert_anomaly_event(
             },
         )
         event_id = int(cursor.lastrowid)
+        media_dispatch.track_created("anomaly_event", event_id)
         action = "created"
         logger.info(
             "Anomalia criada event_id=%s vetor=%s decoder=%s observed_value=%.6f threshold=%.6f",
@@ -35362,7 +35957,8 @@ def upsert_anomaly_event(
                 estimated_packets = estimated_packets + ?,
                 flow_count = flow_count + ?,
                 summary = ?,
-                updated_at = ?
+                updated_at = ?,
+                sensor_id = ?
             WHERE id = ?
             """,
             (
@@ -35399,6 +35995,7 @@ def upsert_anomaly_event(
                 flow_count,
                 summary,
                 now,
+                detected_sensor["detected_sensor_id"],
                 event_id,
             ),
         )
@@ -35663,6 +36260,7 @@ def upsert_detection_template_dns_anomaly_event(conn: sqlite3.Connection, candid
     top_bytes = int(candidate.get("top_bytes") or candidate.get("bytes") or 0)
     target_cidr = host_cidr_for_ip(src_ip)
     dedupe_key = detection_template_dns_anomaly_dedupe_key(candidate)
+    detected_sensor = resolve_detected_sensor(conn, candidate)
     row = conn.execute(
         """
         SELECT *
@@ -35703,12 +36301,13 @@ def upsert_detection_template_dns_anomaly_event(conn: sqlite3.Connection, candid
         "observed_metric": candidate.get("metric_value"),
         "metric": candidate.get("metric"),
         "detection": detection_state,
+        "sensor_detection": detected_sensor,
     }
     source_details.update(detection_fields_from_source_details(source_details))
     trigger_threshold = detection_number(detection_state.get("trigger_threshold")) or 0.0
     common = {
         "attack_vector_id": None,
-        "sensor_id": candidate.get("sensor_id"),
+        "sensor_id": detected_sensor["detected_sensor_id"],
         "interface_if_index": candidate.get("output_if") or candidate.get("input_if"),
         "target_ip": src_ip,
         "target_cidr": target_cidr,
@@ -35768,6 +36367,7 @@ def upsert_detection_template_dns_anomaly_event(conn: sqlite3.Connection, candid
             },
         )
         event_id = int(cursor.lastrowid)
+        media_dispatch.track_created("anomaly_event", event_id)
         action = "created"
     else:
         event_id = int(row["id"])
@@ -35786,7 +36386,8 @@ def upsert_detection_template_dns_anomaly_event(conn: sqlite3.Connection, candid
                 summary = ?, detection_engine = ?, detection_template_id = ?,
                 detection_template_rule_id = ?, response_profile_id = ?, rule_snapshot_json = ?,
                 anomaly_source = ?, source_engine = ?, source_id = ?, source_name = ?,
-                source_details_json = ?, updated_at = ?
+                source_details_json = ?, updated_at = ?,
+                sensor_id = ?
             WHERE id = ?
             """,
             (
@@ -35800,7 +36401,7 @@ def upsert_detection_template_dns_anomaly_event(conn: sqlite3.Connection, candid
                 common["summary"], common["detection_engine"], common["detection_template_id"],
                 common["detection_template_rule_id"], common["response_profile_id"], common["rule_snapshot_json"],
                 common["anomaly_source"], common["source_engine"], common["source_id"], common["source_name"],
-                common["source_details_json"], now, event_id,
+                common["source_details_json"], now, detected_sensor["detected_sensor_id"], event_id,
             ),
         )
         current_gate = detection_automatic_policy_gate(
@@ -36045,6 +36646,7 @@ def run_detection_template_rules_once(*, create_anomalies: bool = True) -> dict[
                 # the WAL write lock is never held across the next rule's slow
                 # ClickHouse round-trip (database is locked starvation).
                 conn.commit()
+                media_dispatch.flush_pending_created(conn)
             conn.commit()
         update_detection_scheduler_status(
             last_run_at=started_at,
@@ -36130,6 +36732,7 @@ def detect_anomalies_once() -> dict[str, Any]:
         # Each vector runs its own ClickHouse query; commit before the next
         # vector so the WAL write lock is never held across slow flow queries.
         conn.commit()
+        media_dispatch.flush_pending_created(conn)
         closed = close_stale_anomaly_events(conn, end_dt)
         conn.commit()
     mitigation = {
@@ -40336,7 +40939,150 @@ def grafana_announcement_cgnat_event(
         return {}
 
 
+GRAFANA_HISTORY_PAGE_CAP = 5000
+
+
+def grafana_enrich_anomaly_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Enriquecimento (mitigacao + CGNAT) de uma lista ja reduzida de itens.
+
+    Extraido do laco original sem alterar a logica por item: o mesmo
+    fetch_anomaly_mitigation_context e o mesmo fallback de CGNAT.
+    """
+    enriched: list[dict[str, Any]] = []
+    with sqlite_connection() as conn:
+        for item in items:
+            reference_id = int(
+                item.get("action_id")
+                if clean_text(item.get("source")).lower() == "security_anomalies"
+                else item.get("id")
+            )
+            try:
+                detail = fetch_anomaly_mitigation_context(conn, reference_id)["event"]
+            except HTTPException:
+                detail = enrich_anomaly_event_with_cgnat(conn, item)
+            enriched.append(detail)
+    return enriched
+
+
+def grafana_anomaly_history_page(
+    *,
+    limit: int,
+    offset: int,
+    status: str = "",
+    severity: str = "",
+    search: str = "",
+    from_value: str | None = None,
+    to_value: str | None = None,
+) -> tuple[list[dict[str, Any]], int]:
+    """Historico do Grafana com filtro e limite aplicados NO BANCO (GRAFANA-PERF-01).
+
+    Antes: carregava todo o historico e enriquecia cada registro (N+1, ~177 s).
+    Agora: a query ja devolve somente a janela pedida e o enriquecimento roda
+    apenas nesses itens. Filtros, ordenacao (last_seen_at desc, id desc) e
+    payload permanecem identicos; a canonicalizacao final reusa
+    filter_grafana_anomaly_history, que e o mesmo caminho do contrato publico.
+
+    O caminho antigo continua valendo para `search` (a busca usa campos que so
+    existem depois do enriquecimento, como mitigation_status) e para janelas
+    muito grandes.
+    """
+    safe_limit = max(1, min(int(limit), 1000))
+    safe_offset = max(0, int(offset))
+    if clean_text(search) or (safe_limit + safe_offset) > GRAFANA_HISTORY_PAGE_CAP:
+        return filter_grafana_anomaly_history(
+            grafana_anomaly_records("history"),
+            from_value=from_value,
+            to_value=to_value,
+            limit=limit,
+            offset=offset,
+            status=status,
+            severity=severity,
+            search=search,
+        )
+
+    parsed_from = parse_utc_timestamp(from_value, "from") if clean_text(from_value) else None
+    parsed_to = parse_utc_timestamp(to_value, "to") if clean_text(to_value) else None
+    if parsed_from is not None and parsed_to is not None and parsed_from >= parsed_to:
+        raise GrafanaApiError(400, "invalid_time_range", "from deve ser anterior a to.")
+
+    where = ["lower(e.status) <> 'active'"]
+    params: list[Any] = []
+    if clean_text(status):
+        where.append("lower(e.status) = ?")
+        params.append(clean_text(status).lower())
+    if clean_text(severity):
+        where.append("lower(e.severity) = ?")
+        params.append(clean_text(severity).lower())
+    last_seen_expr = (
+        "COALESCE(NULLIF(e.last_seen_at, ''), NULLIF(e.ended_at, ''), "
+        "NULLIF(e.updated_at, ''), e.created_at)"
+    )
+    started_expr = "COALESCE(NULLIF(e.started_at, ''), e.created_at)"
+    if parsed_from is not None:
+        where.append(f"datetime({last_seen_expr}) >= datetime(?)")
+        params.append(parsed_from.isoformat().replace("+00:00", "Z"))
+    if parsed_to is not None:
+        where.append(f"datetime({started_expr}) <= datetime(?)")
+        params.append(parsed_to.isoformat().replace("+00:00", "Z"))
+    where_sql = " AND ".join(where)
+
+    with sqlite_connection() as conn:
+        total_events = int(
+            conn.execute(
+                f"SELECT COUNT(*) AS total FROM anomaly_events e WHERE {where_sql}",
+                tuple(params),
+            ).fetchone()["total"]
+        )
+        rows = conn.execute(
+            f"""
+            SELECT
+                e.*,
+                v.name AS attack_vector_name,
+                v.display_name AS attack_vector_display_name,
+                v.domain_type AS attack_domain_type,
+                s.name AS sensor_name
+            FROM anomaly_events e
+            LEFT JOIN attack_vectors v ON v.id = e.attack_vector_id
+            LEFT JOIN sensors s ON s.id = e.sensor_id
+            WHERE {where_sql}
+            ORDER BY e.last_seen_at DESC, e.id DESC
+            LIMIT ?
+            """,
+            (*params, safe_limit + safe_offset),
+        ).fetchall()
+
+    page_items = [anomaly_event_row_to_dict(row) for row in rows]
+    consolidated_items = [group["event"] for group in consolidated_security_anomaly_groups("history")]
+    enriched_page = grafana_enrich_anomaly_items(page_items)
+    enriched_consolidated = grafana_enrich_anomaly_items(consolidated_items)
+    # Contagem exata do lado consolidado (usada apenas no total).
+    _, consolidated_total = filter_grafana_anomaly_history(
+        enriched_consolidated,
+        from_value=from_value,
+        to_value=to_value,
+        limit=GRAFANA_HISTORY_PAGE_CAP,
+        offset=0,
+        status=status,
+        severity=severity,
+        search="",
+    )
+    # A canonicalizacao acontece UMA unica vez, sobre os itens enriquecidos.
+    merged, _ = filter_grafana_anomaly_history(
+        enriched_page + enriched_consolidated,
+        from_value=from_value,
+        to_value=to_value,
+        limit=GRAFANA_HISTORY_PAGE_CAP,
+        offset=0,
+        status=status,
+        severity=severity,
+        search="",
+    )
+    total = total_events + consolidated_total
+    return merged[safe_offset : safe_offset + safe_limit], total
+
+
 def grafana_mitigation_records(
+
     *,
     active_only: bool,
     anomaly_id: int | None,
@@ -40572,15 +41318,14 @@ def grafana_anomaly_history_endpoint(
         "anomalies.history",
     )
     try:
-        items, total = filter_grafana_anomaly_history(
-            grafana_anomaly_records("history"),
-            from_value=from_value,
-            to_value=to_value,
+        items, total = grafana_anomaly_history_page(
             limit=limit,
             offset=offset,
             status=status,
             severity=severity,
             search=search,
+            from_value=from_value,
+            to_value=to_value,
         )
     except GrafanaApiError as exc:
         raise grafana_api_validation_error(

@@ -79,11 +79,11 @@ class SidebarNavigationStaticTest(unittest.TestCase):
         nav_start = HTML.index('<nav class="side-nav"')
         nav_end = HTML.index("</nav>", nav_start)
         nav = HTML[nav_start:nav_end]
-        self.assertEqual(nav.count("data-required-permission="), 19)
-        self.assertEqual(nav.count("data-nav-view="), 20)
+        self.assertEqual(nav.count("data-required-permission="), 20)
+        self.assertEqual(nav.count("data-nav-view="), 21)
         for view in ("dashboard", "flows", "global-map", "sensors", "database", "codecs",
                      "attack-vectors", "anomalies", "peak-hunter", "mitigation",
-                     "bgp-connectors", "ai", "system", "ip-zones", "cgnat", "users",
+                     "bgp-connectors", "ai", "system", "media", "ip-zones", "cgnat", "users",
                      "threat-intelligence", "my-account"):
             self.assertIn(f'data-nav-view="{view}"', nav)
 

@@ -3931,6 +3931,9 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
             <button id="cgnatNavButton" type="button" data-nav-view="cgnat" data-required-permission="cgnat.view">
               <i data-lucide="settings"></i><span>Configurações / CGNAT</span>
             </button>
+            <button id="mediaNavButton" type="button" data-nav-view="media" data-required-permission="settings.view">
+              <i data-lucide="send"></i><span>Mídia</span>
+            </button>
             <button id="usersNavButton" type="button" data-nav-view="users" data-required-permission="users.view">
               <i data-lucide="users"></i><span>Usuários e Acessos</span>
             </button>
@@ -9011,6 +9014,201 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
           </section>
         </section>
 
+        <section id="view-media" class="app-view">
+          <div class="view-header">
+            <div>
+              <h1 class="view-title">Mídia</h1>
+              <div id="mediaViewStatus" class="subtle">Destinos de notificação. O GMJ-FLOW envia o evento assim que a anomalia é persistida.</div>
+            </div>
+            <div class="toolbar">
+              <button id="mediaRefreshButton" type="button" class="btn btn-sm btn-outline-secondary">
+                <i data-lucide="refresh-cw"></i><span>Atualizar</span>
+              </button>
+              <button id="mediaNewButton" type="button" class="btn btn-sm btn-success">
+                <i data-lucide="plus"></i><span>Novo webhook</span>
+              </button>
+            </div>
+          </div>
+
+          <section class="panel p-0">
+            <div class="table-wrap">
+              <table class="table table-sm table-hover align-middle mb-0">
+                <thead>
+                  <tr>
+                    <th>Nome</th>
+                    <th>Tipo</th>
+                    <th>Status</th>
+                    <th>Eventos</th>
+                    <th>Severidade mínima</th>
+                    <th>Sensores</th>
+                    <th>Timeout</th>
+                    <th>Último teste</th>
+                    <th class="text-end">Ações</th>
+                  </tr>
+                </thead>
+                <tbody id="mediaTable">
+                  <tr><td colspan="9" class="text-muted">Carregando destinos…</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="panel p-3 mt-3">
+            <div class="panel-title">Últimas entregas</div>
+            <div id="mediaLogsStatus" class="subtle mb-2">Selecione "Entregas" em um destino para ver o histórico.</div>
+            <div class="table-wrap">
+              <table class="table table-sm align-middle mb-0">
+                <thead>
+                  <tr><th>Quando</th><th>Evento</th><th>Evento ID</th><th>Status</th><th>HTTP</th><th>Duração</th><th>Erro</th></tr>
+                </thead>
+                <tbody id="mediaLogsTable">
+                  <tr><td colspan="7" class="text-muted">—</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+        </section>
+
+        <section class="panel p-3 mt-3">
+          <div class="panel-title">Teste de evento</div>
+          <div class="subtle mb-2">Monta uma anomalia falsa e envia aos webhooks ativos de "Anomalia detectada". Nada é gravado no banco e o detector real não é acionado.</div>
+          <div class="toolbar mb-2">
+            <button id="mediaTestModeFormButton" type="button" class="btn btn-sm btn-outline-secondary">Formulário</button>
+            <button id="mediaTestModeJsonButton" type="button" class="btn btn-sm btn-outline-secondary">JSON</button>
+          </div>
+          <div id="mediaTestFormPane">
+            <div class="ip-zone-form-grid">
+              <div class="field"><label for="mediaTestTargetIp">IP alvo</label><input id="mediaTestTargetIp" class="form-control form-control-sm" value="100.64.17.245"></div>
+              <div class="field"><label for="mediaTestTargetPort">Porta</label><input id="mediaTestTargetPort" type="number" min="0" max="65535" class="form-control form-control-sm" value="443"></div>
+              <div class="field"><label for="mediaTestProtocol">Protocolo</label>
+                <select id="mediaTestProtocol" class="form-select form-select-sm">
+                  <option value="udp" selected>udp</option>
+                  <option value="tcp">tcp</option>
+                  <option value="icmp">icmp</option>
+                </select>
+              </div>
+              <div class="field"><label for="mediaTestVector">Vector</label><input id="mediaTestVector" class="form-control form-control-sm" value="TEST_UDP_FLOOD"></div>
+              <div class="field"><label for="mediaTestDisplayName">Nome do ataque</label><input id="mediaTestDisplayName" class="form-control form-control-sm" value="Teste UDP Flood"></div>
+              <div class="field"><label for="mediaTestSourceName">Source name</label><input id="mediaTestSourceName" class="form-control form-control-sm" value="Evento manual de teste"></div>
+              <div class="field"><label for="mediaTestSeverity">Severidade</label>
+                <select id="mediaTestSeverity" class="form-select form-select-sm">
+                  <option value="info">info</option>
+                  <option value="warning">warning</option>
+                  <option value="critical" selected>critical</option>
+                </select>
+              </div>
+              <div class="field"><label for="mediaTestDirection">Direção</label>
+                <select id="mediaTestDirection" class="form-select form-select-sm">
+                  <option value="receives" selected>receives</option>
+                  <option value="transmits">transmits</option>
+                </select>
+              </div>
+              <div class="field"><label for="mediaTestPps">PPS</label><input id="mediaTestPps" type="number" min="0" step="1" class="form-control form-control-sm" value="420000"></div>
+              <div class="field"><label for="mediaTestBps">BPS</label><input id="mediaTestBps" type="number" min="0" step="1" class="form-control form-control-sm" value="3800000000"></div>
+              <div class="field"><label for="mediaTestSensorId">Sensor ID (opcional)</label><input id="mediaTestSensorId" type="number" min="1" step="1" class="form-control form-control-sm" placeholder="ex: 3"></div>
+            </div>
+          </div>
+          <div id="mediaTestJsonPane" class="d-none">
+            <textarea id="mediaTestJson" class="form-control form-control-sm" rows="12" spellcheck="false"></textarea>
+          </div>
+          <div class="toolbar mt-2">
+            <button id="mediaTestSendButton" type="button" class="btn btn-sm btn-success"><i data-lucide="send"></i><span>Enviar evento de teste</span></button>
+          </div>
+          <div id="mediaTestStatus" class="subtle mt-2"></div>
+          <div class="table-wrap mt-2">
+            <table class="table table-sm align-middle mb-0">
+              <thead><tr><th>Webhook</th><th>Resultado</th><th>HTTP</th><th>Duração</th><th>Erro</th></tr></thead>
+              <tbody id="mediaTestResults"><tr><td colspan="5" class="text-muted">—</td></tr></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="panel p-3 mt-3">
+          <div class="panel-title">Teste Telegram</div>
+          <div class="subtle mb-2">Ferramenta administrativa. O token não é gravado, não é registrado em log e é usado apenas nesta chamada.</div>
+          <div class="ip-zone-form-grid">
+            <div class="field"><label for="mediaTelegramToken">Bot Token</label><input id="mediaTelegramToken" type="password" class="form-control form-control-sm" autocomplete="new-password" placeholder="123456789:ABC-DEF..."></div>
+            <div class="field"><label for="mediaTelegramChatId">Chat ID</label><input id="mediaTelegramChatId" class="form-control form-control-sm" placeholder="-1001234567890"></div>
+          </div>
+          <div class="field"><label for="mediaTelegramText">Mensagem</label><textarea id="mediaTelegramText" class="form-control form-control-sm" rows="3">🚨 Teste GMJ-FLOW
+
+Webhook e integração de mídia funcionando.</textarea></div>
+          <div class="toolbar mt-2">
+            <button id="mediaTelegramSendButton" type="button" class="btn btn-sm btn-success"><i data-lucide="send"></i><span>Enviar mensagem de teste</span></button>
+          </div>
+          <div id="mediaTelegramStatus" class="subtle mt-2"></div>
+        </section>
+
+        <div id="mediaModal" class="gmj-modal" role="dialog" aria-modal="true" aria-labelledby="mediaModalTitle">
+          <div class="gmj-dialog small">
+            <div class="gmj-dialog-header">
+              <h2 id="mediaModalTitle" class="view-title">Novo webhook</h2>
+              <button type="button" class="icon-button" data-close-modal="mediaModal" aria-label="Fechar"><i data-lucide="x"></i></button>
+            </div>
+            <div class="gmj-dialog-body">
+              <div class="d-flex flex-column gap-2">
+                <div class="field"><label for="mediaName">Nome</label><input id="mediaName" class="form-control form-control-sm" placeholder="Ex: n8n alertas clientes"></div>
+                <div class="grid-2">
+                  <div class="field"><label for="mediaType">Tipo</label>
+                    <select id="mediaType" class="form-select form-select-sm">
+                      <option value="webhook">Webhook HTTP</option>
+                    </select>
+                  </div>
+                  <div class="field"><label for="mediaTimeout">Timeout (segundos)</label><input id="mediaTimeout" type="number" min="1" max="30" step="1" value="5" class="form-control form-control-sm"></div>
+                </div>
+                <div class="field"><label for="mediaUrl">URL</label><input id="mediaUrl" class="form-control form-control-sm" placeholder="https://n8n.exemplo/webhook/gmj-flow"></div>
+                <div class="field"><label for="mediaSeverity">Severidade mínima</label>
+                  <select id="mediaSeverity" class="form-select form-select-sm">
+                    <option value="info">Info</option>
+                    <option value="warning">Warning</option>
+                    <option value="critical">Critical</option>
+                  </select>
+                </div>
+                <div class="field">
+                  <label>Eventos habilitados</label>
+                  <div class="d-flex flex-wrap gap-3">
+                    <label class="form-check"><input type="checkbox" class="form-check-input media-event-check" value="anomaly_detected" checked><span class="form-check-label">Anomalia detectada</span></label>
+                    <label class="form-check"><input type="checkbox" class="form-check-input media-event-check" value="anomaly_closed"><span class="form-check-label">Anomalia encerrada</span></label>
+                    <label class="form-check"><input type="checkbox" class="form-check-input media-event-check" value="mitigation_applied"><span class="form-check-label">Mitigação aplicada</span></label>
+                    <label class="form-check"><input type="checkbox" class="form-check-input media-event-check" value="mitigation_withdrawn"><span class="form-check-label">Mitigação retirada</span></label>
+                  </div>
+                </div>
+                <div class="field">
+                  <label>Sensores</label>
+                  <label class="form-check"><input id="mediaAllSensors" type="checkbox" class="form-check-input" checked><span class="form-check-label">Todos os sensores</span></label>
+                  <div id="mediaSensorList" style="display:none; max-height:220px; overflow:auto; margin-top:6px; padding-left:2px;"></div>
+                  <div class="subtle">Desmarque "Todos os sensores" para escolher quais sensores podem disparar eventos para este destino.</div>
+                </div>
+                <div class="grid-2">
+                  <div class="field"><label for="mediaSecretHeader">Header do token</label><input id="mediaSecretHeader" class="form-control form-control-sm" value="X-GMJ-Flow-Token"></div>
+                  <div class="field"><label for="mediaSecret">Token (opcional)</label><input id="mediaSecret" type="password" class="form-control form-control-sm" autocomplete="new-password"></div>
+                </div>
+                <div id="mediaSecretHint" class="subtle">Opcional. Enviado no header configurado, cifrado no banco.</div>
+                <div class="field">
+                  <label for="mediaPayloadTemplate">Payload JSON</label>
+                  <div class="subtle mb-1">Template com placeholders (ex.: <code>{{event}}</code>, <code>{{sensor_name}}</code>, <code>{{pps}}</code>). Vale para produção e para o teste; o teste marca <code>test=true</code>.</div>
+                  <textarea id="mediaPayloadTemplate" class="form-control form-control-sm" rows="14" spellcheck="false" style="font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11px;"></textarea>
+                  <div class="toolbar mt-2" style="flex-wrap: wrap; gap: 6px;">
+                    <button id="mediaPayloadRestoreButton" type="button" class="btn btn-sm btn-outline-secondary">Restaurar padrão</button>
+                    <button id="mediaPayloadFormatButton" type="button" class="btn btn-sm btn-outline-secondary">Formatar JSON</button>
+                    <button id="mediaPayloadValidateButton" type="button" class="btn btn-sm btn-outline-secondary">Validar JSON</button>
+                    <button id="mediaPayloadTestButton" type="button" class="btn btn-sm btn-success">Enviar teste</button>
+                  </div>
+                  <div id="mediaPayloadStatus" class="subtle mt-1"></div>
+                </div>
+                <div class="form-check">
+                  <input id="mediaActive" type="checkbox" class="form-check-input" checked>
+                  <label class="form-check-label" for="mediaActive">Ativo</label>
+                </div>
+                <div id="mediaFormStatus" class="subtle"></div>
+                <div class="toolbar">
+                  <button id="mediaSaveButton" type="button" class="btn btn-sm btn-success"><i data-lucide="save"></i><span>Salvar</span></button>
+                  <button type="button" class="btn btn-sm btn-outline-secondary" data-close-modal="mediaModal">Cancelar</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
         <section id="view-placeholder" class="app-view">
           <div class="panel placeholder-panel p-4">
             <div>
@@ -31687,7 +31885,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         sensors: 'sensors.view', interfaces: 'sensors.view', database: 'settings.view', 'ip-zones': 'dashboard.view',
         'attack-vectors': 'anomalies.view', anomalies: 'anomalies.view', 'threat-intelligence': 'anomalies.view', 'peak-hunter': 'anomalies.view', alerts: 'anomalies.view',
         mitigation: 'mitigations.view', 'bgp-connectors': 'bgp.view', ai: 'settings.view',
-        system: 'settings.view', cgnat: 'cgnat.view', users: 'users.view', codecs: 'settings.view'
+        system: 'settings.view', cgnat: 'cgnat.view', users: 'users.view', codecs: 'settings.view', media: 'settings.view'
       };
       return requirements[canonicalNavigationView(view)] || '';
     }
@@ -31744,6 +31942,522 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       });
     }
 
+    const MEDIA_EVENT_LABELS = {
+      anomaly_detected: 'Anomalia detectada',
+      anomaly_closed: 'Anomalia encerrada',
+      mitigation_applied: 'Mitigação aplicada',
+      mitigation_withdrawn: 'Mitigação retirada',
+    };
+    const MEDIA_SEVERITY_LABELS = { info: 'Info', warning: 'Warning', critical: 'Critical' };
+    let mediaItems = [];
+    let mediaEditingId = null;
+    let mediaSensors = [];
+    let mediaSensorsLoaded = false;
+    let mediaDefaultPayloadTemplate = '';
+    let mediaPayloadPlaceholders = [];
+
+    async function loadMediaSensors() {
+      if (mediaSensorsLoaded) return mediaSensors;
+      try {
+        const payload = await apiRequest('/api/sensors?include_interfaces=false');
+        mediaSensors = Array.isArray(payload?.items) ? payload.items : [];
+        mediaSensorsLoaded = true;
+      } catch (error) {
+        mediaSensors = [];
+      }
+      return mediaSensors;
+    }
+
+    function mediaSensorLabel(sensor) {
+      const name = String(sensor?.name || `Sensor #${sensor?.id ?? ''}`).trim();
+      const exporter = String(sensor?.exporter_ip || '').trim();
+      return exporter ? `${name} (${exporter})` : name;
+    }
+
+    function mediaSensorSummaryText(item) {
+      if (item?.allSensors) return 'Todos';
+      const ids = Array.isArray(item?.sensorIds) ? item.sensorIds : [];
+      return ids.length ? String(ids.length) : '—';
+    }
+
+    function mediaSensorSummaryTitle(item) {
+      if (item?.allSensors) return 'Todos os sensores';
+      const ids = Array.isArray(item?.sensorIds) ? item.sensorIds : [];
+      if (!ids.length) return 'Nenhum sensor selecionado';
+      return ids.map(id => {
+        const sensor = mediaSensors.find(candidate => Number(candidate.id) === Number(id));
+        return sensor ? mediaSensorLabel(sensor) : `#${id}`;
+      }).join(', ');
+    }
+
+    function renderMediaSensors(selectedIds) {
+      const list = document.getElementById('mediaSensorList');
+      if (!list) return;
+      const selected = new Set((selectedIds || []).map(Number));
+      if (!mediaSensors.length) {
+        list.innerHTML = '<div class="subtle">Nenhum sensor cadastrado.</div>';
+        return;
+      }
+      list.innerHTML = mediaSensors.map(sensor => {
+        const checked = selected.has(Number(sensor.id)) ? ' checked' : '';
+        const exporter = sensor.exporter_ip ? ` <span class="subtle">${escapeHtml(sensor.exporter_ip)}</span>` : '';
+        return `<label class="form-check media-sensor-item"><input type="checkbox" class="form-check-input media-sensor-check" value="${Number(sensor.id)}"${checked}><span class="form-check-label">${escapeHtml(sensor.name || `Sensor #${sensor.id}`)}${exporter}</span></label>`;
+      }).join('');
+    }
+
+    function updateMediaSensorVisibility() {
+      const all = document.getElementById('mediaAllSensors');
+      const list = document.getElementById('mediaSensorList');
+      if (!list || !all) return;
+      list.style.display = all.checked ? 'none' : 'block';
+    }
+
+    function mediaEventLabelList(value) {
+      const items = Array.isArray(value) ? value : [];
+      if (!items.length) return '—';
+      return items.map(item => MEDIA_EVENT_LABELS[item] || item).join(', ');
+    }
+
+    function mediaSeverityLabel(value) {
+      const key = String(value || 'info').toLowerCase();
+      return MEDIA_SEVERITY_LABELS[key] || key;
+    }
+
+    function mediaTestSummary(item) {
+      if (!item || !item.last_test_at) return 'Nunca testado';
+      const when = formatDateTime(item.last_test_at);
+      const http = item.last_test_http_status ? `HTTP ${item.last_test_http_status}` : 'sem resposta';
+      const ms = item.last_test_duration_ms ? ` · ${item.last_test_duration_ms} ms` : '';
+      const label = item.last_test_status === 'success' ? 'Sucesso' : 'Erro';
+      const error = item.last_test_error ? ` · ${item.last_test_error}` : '';
+      return `${label} · ${http}${ms}${error} · ${when}`;
+    }
+
+    async function loadMediaView() {
+      const status = document.getElementById('mediaViewStatus');
+      if (status) status.textContent = 'Carregando destinos…';
+      const payload = await apiRequest('/api/media');
+      mediaItems = Array.isArray(payload?.items) ? payload.items : [];
+      if (Array.isArray(payload?.sensors)) {
+        mediaSensors = payload.sensors;
+        mediaSensorsLoaded = true;
+      }
+      if (typeof payload?.default_payload_template === 'string') {
+        mediaDefaultPayloadTemplate = payload.default_payload_template;
+      }
+      if (Array.isArray(payload?.payload_placeholders)) {
+        mediaPayloadPlaceholders = payload.payload_placeholders;
+      }
+      renderMediaTable();
+      if (status) {
+        status.textContent = mediaItems.length
+          ? `${mediaItems.length} destino(s) configurado(s). O envio acontece após a persistência da anomalia.`
+          : 'Nenhum destino configurado. Crie um webhook para receber as anomalias.';
+      }
+    }
+
+    function renderMediaTable() {
+      const body = document.getElementById('mediaTable');
+      if (!body) return;
+      if (!mediaItems.length) {
+        body.innerHTML = '<tr><td colspan="9" class="text-muted">Nenhum destino cadastrado.</td></tr>';
+        return;
+      }
+      body.innerHTML = mediaItems.map(item => `
+        <tr>
+          <td>${escapeHtml(item.name)}</td>
+          <td>${escapeHtml(item.type)}</td>
+          <td>${item.active ? '<span class="badge-soft on">Ativo</span>' : '<span class="badge-soft off">Inativo</span>'}</td>
+          <td class="subtle">${escapeHtml(mediaEventLabelList(item.event_types))}</td>
+          <td>${escapeHtml(mediaSeverityLabel(item.minimum_severity))}</td>
+          <td class="subtle" title="${escapeHtml(mediaSensorSummaryTitle(item))}">${escapeHtml(mediaSensorSummaryText(item))}</td>
+          <td>${escapeHtml(item.timeout_seconds)} s</td>
+          <td class="subtle">${escapeHtml(mediaTestSummary(item))}</td>
+          <td class="text-end">
+            <button type="button" class="btn btn-sm btn-outline-secondary media-action" data-media-action="test" data-id="${Number(item.id)}">Testar</button>
+            <button type="button" class="btn btn-sm btn-outline-secondary media-action" data-media-action="logs" data-id="${Number(item.id)}">Entregas</button>
+            <button type="button" class="btn btn-sm btn-outline-secondary media-action" data-media-action="toggle" data-id="${Number(item.id)}">${item.active ? 'Desativar' : 'Ativar'}</button>
+            <button type="button" class="btn btn-sm btn-outline-secondary media-action" data-media-action="edit" data-id="${Number(item.id)}">Editar</button>
+            <button type="button" class="btn btn-sm btn-outline-danger media-action" data-media-action="delete" data-id="${Number(item.id)}">Excluir</button>
+          </td>
+        </tr>
+      `).join('');
+    }
+
+    async function openMediaModal(item = null) {
+      mediaEditingId = item ? Number(item.id) : null;
+      document.getElementById('mediaModalTitle').textContent = item ? 'Editar destino' : 'Novo webhook';
+      document.getElementById('mediaName').value = item?.name || '';
+      document.getElementById('mediaType').value = item?.type || 'webhook';
+      document.getElementById('mediaUrl').value = item?.url || '';
+      document.getElementById('mediaActive').checked = item ? Boolean(item.active) : true;
+      document.getElementById('mediaSeverity').value = item?.minimum_severity || 'info';
+      document.getElementById('mediaTimeout').value = item?.timeout_seconds || 5;
+      document.getElementById('mediaSecretHeader').value = item?.secret_header || 'X-GMJ-Flow-Token';
+      document.getElementById('mediaSecret').value = '';
+      document.getElementById('mediaSecretHint').textContent = item?.has_secret
+        ? 'Já existe um token salvo. Deixe em branco para manter o atual.'
+        : 'Opcional. Enviado no header configurado, cifrado no banco.';
+      const events = Array.isArray(item?.event_types) ? item.event_types : ['anomaly_detected'];
+      document.querySelectorAll('.media-event-check').forEach(input => {
+        input.checked = events.includes(input.value);
+      });
+      await loadMediaSensors();
+      const allSensors = document.getElementById('mediaAllSensors');
+      if (allSensors) allSensors.checked = item ? Boolean(item.allSensors) : true;
+      renderMediaSensors(item?.sensorIds || []);
+      updateMediaSensorVisibility();
+      const payloadTemplate = document.getElementById('mediaPayloadTemplate');
+      if (payloadTemplate) payloadTemplate.value = item?.payload_template || mediaDefaultPayloadTemplate || '';
+      setText('mediaPayloadStatus', '');
+      setText('mediaFormStatus', '');
+      openModal('mediaModal');
+    }
+
+    function mediaPayloadTemplateValue() {
+      const node = document.getElementById('mediaPayloadTemplate');
+      const value = node ? node.value : '';
+      const trimmed = value.trim();
+      const defaultTrimmed = String(mediaDefaultPayloadTemplate || '').trim();
+      if (!trimmed || trimmed === defaultTrimmed) return '';
+      return value;
+    }
+
+    async function mediaPayloadPreview() {
+      const template = document.getElementById('mediaPayloadTemplate')?.value || '';
+      return await apiRequest('/api/media/payload-template/preview', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ template }),
+      });
+    }
+
+    function mediaPayloadRestore() {
+      const node = document.getElementById('mediaPayloadTemplate');
+      if (node) node.value = mediaDefaultPayloadTemplate || '';
+      setText('mediaPayloadStatus', 'Template padrão restaurado. Salve para aplicar.');
+    }
+
+    async function mediaPayloadValidate() {
+      setText('mediaPayloadStatus', 'Validando…');
+      try {
+        const result = await mediaPayloadPreview();
+        setText('mediaPayloadStatus', result?.ok
+          ? 'JSON válido (renderizado com dados de exemplo).'
+          : `Erro de sintaxe: ${result?.error || 'template inválido'}`);
+      } catch (error) {
+        setText('mediaPayloadStatus', `Erro: ${error.message}`);
+      }
+    }
+
+    async function mediaPayloadFormat() {
+      setText('mediaPayloadStatus', 'Formatando…');
+      try {
+        const result = await mediaPayloadPreview();
+        if (!result?.ok) {
+          setText('mediaPayloadStatus', `Erro de sintaxe: ${result?.error || 'template inválido'}`);
+          return;
+        }
+        const node = document.getElementById('mediaPayloadTemplate');
+        if (node) node.value = result.template || '';
+        setText('mediaPayloadStatus', 'JSON formatado.');
+      } catch (error) {
+        setText('mediaPayloadStatus', `Erro: ${error.message}`);
+      }
+    }
+
+    async function mediaPayloadSendTest() {
+      setText('mediaPayloadStatus', 'Salvando e testando…');
+      try {
+        const saved = await persistMediaForm();
+        if (saved?.id) mediaEditingId = Number(saved.id);
+        const result = await apiRequest(`/api/media/${mediaEditingId}/test`, { method: 'POST' });
+        const http = result?.http_status ? `HTTP ${result.http_status}` : 'sem resposta HTTP';
+        const label = result?.ok ? 'Teste OK' : 'Falha no teste';
+        setText('mediaPayloadStatus', `${label} · ${http} · ${result?.duration_ms ?? 0} ms${result?.error ? ` · ${result.error}` : ''}`);
+        await loadMediaView().catch(() => {});
+      } catch (error) {
+        setText('mediaPayloadStatus', `Falha: ${error.message}`);
+      }
+    }
+
+    function mediaPayloadFromForm() {
+      const eventTypes = Array.from(document.querySelectorAll('.media-event-check'))
+        .filter(input => input.checked)
+        .map(input => input.value);
+      return {
+        name: document.getElementById('mediaName').value.trim(),
+        type: document.getElementById('mediaType').value,
+        url: document.getElementById('mediaUrl').value.trim(),
+        active: document.getElementById('mediaActive').checked,
+        event_types: eventTypes,
+        minimum_severity: document.getElementById('mediaSeverity').value,
+        timeout_seconds: Number(document.getElementById('mediaTimeout').value || 5),
+        allSensors: document.getElementById('mediaAllSensors').checked,
+        sensorIds: document.getElementById('mediaAllSensors').checked
+          ? []
+          : Array.from(document.querySelectorAll('.media-sensor-check')).filter(input => input.checked).map(input => Number(input.value)),
+        payload_template: mediaPayloadTemplateValue(),
+        secret: document.getElementById('mediaSecret').value,
+        secret_header: document.getElementById('mediaSecretHeader').value.trim() || 'X-GMJ-Flow-Token',
+      };
+    }
+
+    function mediaFormValidationError(payload) {
+      if (!payload.name) return 'Informe o nome do destino.';
+      if (!payload.url) return 'Informe a URL do webhook.';
+      if (!payload.event_types.length) return 'Selecione ao menos um evento.';
+      if (!payload.allSensors && !payload.sensorIds.length) return 'Selecione ao menos um sensor ou marque "Todos os sensores".';
+      return '';
+    }
+
+    async function persistMediaForm() {
+      const payload = mediaPayloadFromForm();
+      const error = mediaFormValidationError(payload);
+      if (error) throw new Error(error);
+      const url = mediaEditingId ? `/api/media/${mediaEditingId}` : '/api/media';
+      const saved = await apiRequest(url, {
+        method: mediaEditingId ? 'PUT' : 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      if (saved?.id) mediaEditingId = Number(saved.id);
+      return saved;
+    }
+
+    async function saveMedia() {
+      setText('mediaFormStatus', 'Salvando…');
+      try {
+        await persistMediaForm();
+        closeModal('mediaModal');
+        await loadMediaView();
+      } catch (error) {
+        setText('mediaFormStatus', `Falha: ${error.message}`);
+      }
+    }
+
+    async function testMedia(id) {
+      const info = mediaItems.find(item => Number(item.id) === Number(id));
+      setText('mediaViewStatus', `Testando ${info?.name || 'destino'}…`);
+      try {
+        const result = await apiRequest(`/api/media/${id}/test`, { method: 'POST' });
+        const http = result.http_status ? `HTTP ${result.http_status}` : 'sem resposta HTTP';
+        const label = result.ok ? 'Sucesso' : 'Falha';
+        setText('mediaViewStatus', `${label} · ${http} · ${result.duration_ms} ms${result.error ? ` · ${result.error}` : ''}`);
+      } catch (error) {
+        setText('mediaViewStatus', `Falha no teste: ${error.message}`);
+      }
+      await loadMediaView().catch(() => {});
+    }
+
+    async function loadMediaLogs(id) {
+      const info = mediaItems.find(item => Number(item.id) === Number(id));
+      setText('mediaLogsStatus', `Entregas de ${info?.name || id}…`);
+      const body = document.getElementById('mediaLogsTable');
+      try {
+        const payload = await apiRequest(`/api/media/${id}/logs?limit=20`);
+        const items = Array.isArray(payload?.items) ? payload.items : [];
+        if (!items.length) {
+          body.innerHTML = '<tr><td colspan="7" class="text-muted">Nenhuma entrega registrada.</td></tr>';
+        } else {
+          body.innerHTML = items.map(row => `
+            <tr>
+              <td>${escapeHtml(formatDateTime(row.created_at))}</td>
+              <td>${escapeHtml(MEDIA_EVENT_LABELS[row.event_type] || row.event_type || '—')}</td>
+              <td>${escapeHtml(row.event_id ?? '—')}</td>
+              <td>${row.status === 'success' ? '<span class="badge-soft on">Sucesso</span>' : '<span class="badge-soft off">Erro</span>'}</td>
+              <td>${row.http_status ? `HTTP ${row.http_status}` : '—'}</td>
+              <td>${row.duration_ms ? `${row.duration_ms} ms` : '—'}</td>
+              <td class="subtle">${escapeHtml(row.error || '—')}</td>
+            </tr>
+          `).join('');
+        }
+        setText('mediaLogsStatus', `${items.length} entrega(s) recentes.`);
+      } catch (error) {
+        body.innerHTML = '<tr><td colspan="7" class="text-muted">Falha ao carregar entregas.</td></tr>';
+        setText('mediaLogsStatus', `Falha: ${error.message}`);
+      }
+    }
+
+    const MEDIA_TEST_DEFAULTS = {
+      target_ip: '100.64.17.245',
+      target_port: 443,
+      protocol: 'udp',
+      vector_name: 'TEST_UDP_FLOOD',
+      display_name: 'Teste UDP Flood',
+      source_name: 'Evento manual de teste',
+      severity: 'critical',
+      direction: 'receives',
+      pps: 420000,
+      bps: 3800000000,
+      sensor_id: null,
+    };
+    let mediaTestMode = 'form';
+
+    function mediaTestReadForm() {
+      return {
+        target_ip: document.getElementById('mediaTestTargetIp').value.trim(),
+        target_port: Number(document.getElementById('mediaTestTargetPort').value || 0),
+        protocol: document.getElementById('mediaTestProtocol').value,
+        vector_name: document.getElementById('mediaTestVector').value.trim(),
+        display_name: document.getElementById('mediaTestDisplayName').value.trim(),
+        source_name: document.getElementById('mediaTestSourceName').value.trim(),
+        severity: document.getElementById('mediaTestSeverity').value,
+        direction: document.getElementById('mediaTestDirection').value,
+        pps: Number(document.getElementById('mediaTestPps').value || 0),
+        bps: Number(document.getElementById('mediaTestBps').value || 0),
+        sensor_id: Number(document.getElementById('mediaTestSensorId').value || 0) || null,
+      };
+    }
+
+    function mediaTestWriteForm(data) {
+      const value = { ...MEDIA_TEST_DEFAULTS, ...(data || {}) };
+      document.getElementById('mediaTestTargetIp').value = value.target_ip ?? '';
+      document.getElementById('mediaTestTargetPort').value = value.target_port ?? '';
+      document.getElementById('mediaTestProtocol').value = value.protocol || 'udp';
+      document.getElementById('mediaTestVector').value = value.vector_name ?? '';
+      document.getElementById('mediaTestDisplayName').value = value.display_name ?? '';
+      document.getElementById('mediaTestSourceName').value = value.source_name ?? '';
+      document.getElementById('mediaTestSeverity').value = value.severity || 'info';
+      document.getElementById('mediaTestDirection').value = value.direction || 'receives';
+      document.getElementById('mediaTestPps').value = value.pps ?? 0;
+      document.getElementById('mediaTestBps').value = value.bps ?? 0;
+      document.getElementById('mediaTestSensorId').value = value.sensor_id ?? '';
+    }
+
+    function mediaTestParseJson() {
+      const raw = document.getElementById('mediaTestJson').value.trim();
+      if (!raw) return { ok: false, error: 'O JSON está vazio.' };
+      try {
+        const parsed = JSON.parse(raw);
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          return { ok: false, error: 'O JSON precisa ser um objeto com os campos do evento.' };
+        }
+        return { ok: true, data: parsed };
+      } catch (error) {
+        return { ok: false, error: `JSON inválido: ${error.message}` };
+      }
+    }
+
+    function setMediaTestMode(mode) {
+      if (mode === mediaTestMode) return;
+      if (mode === 'json') {
+        document.getElementById('mediaTestJson').value = JSON.stringify(mediaTestReadForm(), null, 2);
+        setText('mediaTestStatus', 'Editando o objeto "data" em JSON.');
+      } else {
+        const parsed = mediaTestParseJson();
+        if (parsed.ok) {
+          mediaTestWriteForm(parsed.data);
+          setText('mediaTestStatus', '');
+        } else {
+          setText('mediaTestStatus', parsed.error);
+          return;
+        }
+      }
+      mediaTestMode = mode;
+      document.getElementById('mediaTestFormPane').classList.toggle('d-none', mode !== 'form');
+      document.getElementById('mediaTestJsonPane').classList.toggle('d-none', mode !== 'json');
+    }
+
+    function renderMediaTestResults(payload) {
+      const body = document.getElementById('mediaTestResults');
+      const results = Array.isArray(payload?.results) ? payload.results : [];
+      if (!results.length) {
+        body.innerHTML = '<tr><td colspan="5" class="text-muted">Nenhum webhook ativo compatível com "Anomalia detectada".</td></tr>';
+        return 0;
+      }
+      body.innerHTML = results.map(row => `
+        <tr>
+          <td>${escapeHtml(row.name || row.media_id)}</td>
+          <td>${row.ok ? '<span class="badge-soft on">Sucesso</span>' : '<span class="badge-soft off">Falha</span>'}</td>
+          <td>${row.http_status ? `HTTP ${row.http_status}` : '—'}</td>
+          <td>${row.duration_ms ? `${row.duration_ms} ms` : '—'}</td>
+          <td class="subtle">${escapeHtml(row.error || '—')}</td>
+        </tr>
+      `).join('');
+      return results.filter(item => item.ok).length;
+    }
+
+    async function sendMediaTestEvent() {
+      let data;
+      if (mediaTestMode === 'json') {
+        const parsed = mediaTestParseJson();
+        if (!parsed.ok) { setText('mediaTestStatus', parsed.error); return; }
+        data = parsed.data;
+      } else {
+        data = mediaTestReadForm();
+      }
+      setText('mediaTestStatus', 'Enviando evento de teste…');
+      try {
+        const payload = await apiRequest('/api/media/test-event', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(data),
+        });
+        const okCount = renderMediaTestResults(payload);
+        const total = Array.isArray(payload?.results) ? payload.results.length : 0;
+        setText('mediaTestStatus', `Evento de teste (test=true) enviado para ${total} webhook(s); ${okCount} com sucesso. Nada foi gravado como anomalia real.`);
+      } catch (error) {
+        setText('mediaTestStatus', `Falha: ${error.message}`);
+      }
+    }
+
+    async function sendMediaTestTelegram() {
+      const token = document.getElementById('mediaTelegramToken').value.trim();
+      const chatId = document.getElementById('mediaTelegramChatId').value.trim();
+      const text = document.getElementById('mediaTelegramText').value;
+      if (!token) { setText('mediaTelegramStatus', 'Informe o Bot Token.'); return; }
+      if (!chatId) { setText('mediaTelegramStatus', 'Informe o Chat ID.'); return; }
+      if (!text.trim()) { setText('mediaTelegramStatus', 'Informe a mensagem.'); return; }
+      setText('mediaTelegramStatus', 'Enviando mensagem de teste…');
+      try {
+        const payload = await apiRequest('/api/media/test-telegram', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ bot_token: token, chat_id: chatId, text }),
+        });
+        const http = payload.http_status ? `HTTP ${payload.http_status}` : 'sem resposta HTTP';
+        setText('mediaTelegramStatus', `${payload.ok ? 'Sucesso' : 'Falha'} · ${http} · ${payload.duration_ms} ms${payload.error ? ` · ${payload.error}` : ''}`);
+      } catch (error) {
+        setText('mediaTelegramStatus', `Falha: ${error.message}`);
+      } finally {
+        document.getElementById('mediaTelegramToken').value = '';
+      }
+    }
+
+    function bindMediaTestTools() {
+      mediaTestWriteForm(MEDIA_TEST_DEFAULTS);
+      document.getElementById('mediaTestModeFormButton')?.addEventListener('click', () => setMediaTestMode('form'));
+      document.getElementById('mediaTestModeJsonButton')?.addEventListener('click', () => setMediaTestMode('json'));
+      document.getElementById('mediaTestSendButton')?.addEventListener('click', () => sendMediaTestEvent().catch(error => setText('mediaTestStatus', `Falha: ${error.message}`)));
+      document.getElementById('mediaTelegramSendButton')?.addEventListener('click', () => sendMediaTestTelegram().catch(error => setText('mediaTelegramStatus', `Falha: ${error.message}`)));
+    }
+    function bindMediaView() {
+      document.getElementById('mediaRefreshButton')?.addEventListener('click', () => loadMediaView().catch(error => setText('mediaViewStatus', `Falha: ${error.message}`)));
+      document.getElementById('mediaNewButton')?.addEventListener('click', () => openMediaModal(null).catch(error => setText('mediaViewStatus', `Falha: ${error.message}`)));
+      document.getElementById('mediaSaveButton')?.addEventListener('click', () => saveMedia().catch(error => setText('mediaFormStatus', `Falha: ${error.message}`)));
+      document.getElementById('mediaAllSensors')?.addEventListener('change', updateMediaSensorVisibility);
+      document.getElementById('mediaPayloadRestoreButton')?.addEventListener('click', mediaPayloadRestore);
+      document.getElementById('mediaPayloadFormatButton')?.addEventListener('click', () => mediaPayloadFormat().catch(error => setText('mediaPayloadStatus', `Erro: ${error.message}`)));
+      document.getElementById('mediaPayloadValidateButton')?.addEventListener('click', () => mediaPayloadValidate().catch(error => setText('mediaPayloadStatus', `Erro: ${error.message}`)));
+      document.getElementById('mediaPayloadTestButton')?.addEventListener('click', () => mediaPayloadSendTest().catch(error => setText('mediaPayloadStatus', `Falha: ${error.message}`)));
+      bindMediaTestTools();
+      document.getElementById('mediaTable')?.addEventListener('click', event => {
+        const target = event.target instanceof Element ? event.target : event.target.parentElement;
+        const button = target?.closest('.media-action');
+        if (!button) return;
+        const id = Number(button.dataset.id);
+        const action = button.dataset.mediaAction;
+        if (action === 'edit') openMediaModal(mediaItems.find(item => Number(item.id) === id) || null).catch(error => setText('mediaViewStatus', `Falha: ${error.message}`));
+        if (action === 'test') testMedia(id).catch(error => setText('mediaViewStatus', `Falha: ${error.message}`));
+        if (action === 'logs') loadMediaLogs(id).catch(error => setText('mediaLogsStatus', `Falha: ${error.message}`));
+        if (action === 'toggle') apiRequest(`/api/media/${id}/toggle`, { method: 'POST' }).then(() => loadMediaView()).catch(error => setText('mediaViewStatus', `Falha: ${error.message}`));
+        if (action === 'delete') {
+          if (!window.confirm('Excluir este destino de mídia?')) return;
+          apiRequest(`/api/media/${id}`, { method: 'DELETE' }).then(() => loadMediaView()).catch(error => setText('mediaViewStatus', `Falha: ${error.message}`));
+        }
+      });
+    }
     function showView(view, placeholderTitle = '') {
       view = canonicalNavigationView(view);
       const requiredPermission = requiredPermissionForView(view);
@@ -31884,6 +32598,10 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         document.getElementById('view-interfaces').classList.add('active');
         document.querySelector('[data-nav-view="interfaces"]').classList.add('active');
         loadInterfacesView().catch(error => setText('interfacesViewStatus', `Falha: ${error.message}`));
+      } else if (view === 'media') {
+        document.getElementById('view-media').classList.add('active');
+        document.querySelector('[data-nav-view="media"]').classList.add('active');
+        loadMediaView().catch(error => setText('mediaViewStatus', `Falha: ${error.message}`));
       } else if (view === 'alerts') {
         document.getElementById('view-alerts').classList.add('active');
         document.querySelector('[data-nav-view="alerts"]').classList.add('active');
@@ -33105,6 +33823,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     initNavGroups();
     bindInterfaceDrawerEvents();
     bindAlertsView();
+    bindMediaView();
     applyDashboardLayout();
     try {
       installConfigurableDashboardEvents();
