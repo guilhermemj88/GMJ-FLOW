@@ -246,6 +246,30 @@ TEST_SAMPLE_EVENT = {
     "dedupe_key": "TEST-0000",
 }
 
+# Sample padrao do botao "Testar destino" (test_media_integration). Usa os
+# mesmos nomes de campo do builder do preview administrativo
+# (media_test_event_data, em main.py) e reproduz o formato logico de uma
+# anomalia real de saida (direction=transmits) com coordenada CGNAT
+# resolvivel: 179.189.80.242:20486 -> 100.64.9.50. O lookup correto e
+# top_src_ip/top_src_port; target_port=53 NAO participa da resolucao.
+TEST_DESTINATION_SAMPLE: dict[str, Any] = {
+    **TEST_SAMPLE_EVENT,
+    "target_ip": "179.189.80.242",
+    "target_cidr": "179.189.80.242/32",
+    "target_port": 53,
+    "target_role": "src_ip",
+    "direction": "transmits",
+    "top_src_ip": "179.189.80.242",
+    "top_src_port": 20486,
+    "top_dst_ip": "54.233.253.229",
+    "top_dst_port": 53,
+    "protocol": "udp",
+    "source_name": "Evento manual de teste",
+    "source_engine": "gmjflow",
+    "source_id": "test",
+    "status": "test",
+}
+
 # Endpoints de metadata de cloud que jamais devem ser alvo de um webhook.
 _BLOCKED_HOSTS = {
     "metadata.google.internal",
@@ -1269,17 +1293,33 @@ def dispatch_security_anomaly_detected(conn: sqlite3.Connection, anomaly_ids: It
 
 
 def test_media_integration(integration: Any, *, sample_data: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Envia um payload de exemplo para um destino. Sincrono, para a tela de teste."""
+    """Envia um payload de exemplo para um destino. Sincrono, para a tela de teste.
+
+    O sample padrao (TEST_DESTINATION_SAMPLE) segue o mesmo formato logico de
+    uma anomalia real e passa pelo MESMO enriquecimento CGNAT do envio real e
+    do preview (enrich_payload_with_cgnat -> enrich_anomaly_event_with_cgnat);
+    nenhuma regra de lookup e duplicada aqui.
+    """
     item = dict(integration)
     try:
         url = validate_webhook_url(item.get("url"))
     except MediaUrlError as exc:
         return {"ok": False, "http_status": 0, "duration_ms": 0, "error": str(exc)}
-    sample = dict(TEST_SAMPLE_EVENT)
+    sample = dict(TEST_DESTINATION_SAMPLE)
     if sample_data:
         sample.update({key: value for key, value in dict(sample_data).items() if value is not None})
     else:
         sample["severity"] = normalize_severity(item.get("minimum_severity"))
+    cgnat_block: dict[str, Any] | None = None
+    try:
+        conn = connect()
+        try:
+            # Mesmo enriquecimento CGNAT do envio real/preview (reuso; nada duplicado).
+            sample, cgnat_block = enrich_payload_with_cgnat(conn, sample)
+        finally:
+            conn.close()
+    except Exception:
+        cgnat_block = None
     template = clean_text(item.get("payload_template")) or DEFAULT_PAYLOAD_TEMPLATE
     try:
         envelope = render_payload_from_template(template, sample, event_type="anomaly_detected", is_test=True)
@@ -1287,6 +1327,7 @@ def test_media_integration(integration: Any, *, sample_data: dict[str, Any] | No
         envelope = render_payload_from_template(
             DEFAULT_PAYLOAD_TEMPLATE, sample, event_type="anomaly_detected", is_test=True
         )
+    envelope = inject_cgnat_block(envelope, cgnat_block)
     return post_json(url, envelope, integration_headers(item), normalize_timeout(item.get("timeout_seconds")))
 
 

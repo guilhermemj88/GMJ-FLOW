@@ -1242,6 +1242,12 @@ class MediaCgnatPayloadTest(MediaBase):
             media_dispatch._QUEUE.task_done()
         return jobs
 
+    def _row(self, media_id):
+        with backend_main.sqlite_connection() as conn:
+            return conn.execute(
+                "SELECT * FROM media_integrations WHERE id = ?", (int(media_id),)
+            ).fetchone()
+
     def _event_4688(self, **overrides):
         data = dict(media_dispatch.TEST_SAMPLE_EVENT)
         data.update(
@@ -1437,6 +1443,113 @@ class MediaCgnatPayloadTest(MediaBase):
         self.assertEqual(preview["payload"]["private_ip"], "100.64.9.50")
         self.assertEqual(preview["payload"]["confidence"], 1.0)
         self.assertIs(preview["payload"]["resolved"], True)
+
+    def test_test_destination_button_sends_cgnat_4688(self):
+        """Botao Testar destino: webhook real recebe data.cgnat do caso 4688."""
+        self._seed_cgnat()
+        media_id = self._insert_destination()
+        with mock.patch.object(
+            media_dispatch,
+            "post_json",
+            return_value={"ok": True, "http_status": 200, "duration_ms": 9, "error": ""},
+        ) as post:
+            result = backend_main.test_media(media_id, request=None)
+        self.assertTrue(result["ok"])
+        envelope = post.call_args[0][1]
+        cgnat = envelope["data"]["cgnat"]
+        self.assertEqual(
+            cgnat,
+            {
+                "resolved": True,
+                "public_ip": "179.189.80.242",
+                "public_port": 20486,
+                "private_ip": "100.64.9.50",
+                "device_name": "A10-FIBINET",
+                "pool_name": "PUBLIC-POOL-01",
+                "confidence": 1.0,
+            },
+        )
+        self.assertEqual(cgnat["public_port"], 20486)
+        data = envelope["data"]
+        self.assertEqual(data["target_ip"], "179.189.80.242")
+        self.assertEqual(data["target_port"], 53)
+        self.assertEqual(data["target_role"], "src_ip")
+        self.assertEqual(data["direction"], "transmits")
+        self.assertEqual(data["top_src_ip"], "179.189.80.242")
+        self.assertEqual(data["top_src_port"], 20486)
+        self.assertEqual(data["top_dst_ip"], "54.233.253.229")
+        self.assertEqual(data["top_dst_port"], 53)
+
+    def test_test_destination_button_ignores_target_port_for_cgnat(self):
+        """Se target_port=53 fosse usado no lookup, o decoy 100.64.99.99 apareceria."""
+        self._seed_cgnat()
+        with backend_main.sqlite_connection() as conn:
+            now = "2026-10-03T12:00:00Z"
+            batch = conn.execute("SELECT id FROM cgnat_import_batches ORDER BY id DESC LIMIT 1").fetchone()
+            conn.execute(
+                """
+                INSERT INTO cgnat_port_mappings
+                    (batch_id, source_type, source_filename, device_name, pool_name, public_ip, private_ip,
+                     protocol, port_start, port_end, active, confidence, created_at, updated_at)
+                VALUES (?, 'a10', 'decoy.txt', 'DECOY', 'DECOY-POOL', '179.189.80.242', '100.64.99.99',
+                        'udp', 53, 53, 1, 1.0, ?, ?)
+                """,
+                (int(batch["id"]), now, now),
+            )
+            conn.commit()
+        media_id = self._insert_destination()
+        with mock.patch.object(
+            media_dispatch,
+            "post_json",
+            return_value={"ok": True, "http_status": 200, "duration_ms": 1, "error": ""},
+        ) as post:
+            backend_main.test_media(media_id, request=None)
+        cgnat = post.call_args[0][1]["data"]["cgnat"]
+        self.assertEqual(cgnat["public_port"], 20486)
+        self.assertEqual(cgnat["private_ip"], "100.64.9.50")
+
+    def test_test_destination_button_no_match_keeps_legacy_payload(self):
+        self._seed_cgnat()
+        media_id = self._insert_destination()
+        no_match = {"top_src_ip": "203.0.113.10", "top_src_port": 50000}
+        with mock.patch.object(
+            media_dispatch,
+            "post_json",
+            return_value={"ok": True, "http_status": 200, "duration_ms": 1, "error": ""},
+        ) as post:
+            media_dispatch.test_media_integration(self._row(media_id), sample_data=no_match)
+        envelope = post.call_args[0][1]
+        self.assertNotIn("cgnat", envelope["data"])
+        self.assertEqual(envelope["data"]["top_src_ip"], "203.0.113.10")
+        self.assertEqual(envelope["data"]["top_src_port"], 50000)
+        self.assertEqual(sorted(envelope.keys()), ["data", "event", "sent_at", "version"])
+
+    def test_test_destination_button_placeholders(self):
+        self._seed_cgnat()
+        template = (
+            '{"event": "{{event}}", "resolved": {{cgnat_resolved}}, "private_ip": "{{cgnat_private_ip}}", '
+            '"public": "{{cgnat_public_ip}}:{{cgnat_public_port}}", "pool": "{{cgnat_pool_name}}", '
+            '"device": "{{cgnat_device_name}}", "confidence": {{cgnat_confidence}}}'
+        )
+        media_id = self._insert_destination(payload_template=template)
+        with mock.patch.object(
+            media_dispatch,
+            "post_json",
+            return_value={"ok": True, "http_status": 200, "duration_ms": 1, "error": ""},
+        ) as post:
+            backend_main.test_media(media_id, request=None)
+        self.assertEqual(
+            post.call_args[0][1],
+            {
+                "event": "anomaly_detected",
+                "resolved": True,
+                "private_ip": "100.64.9.50",
+                "public": "179.189.80.242:20486",
+                "pool": "PUBLIC-POOL-01",
+                "device": "A10-FIBINET",
+                "confidence": 1.0,
+            },
+        )
 
     def test_cgnat_placeholders_are_known_and_valid(self):
         for name in (
