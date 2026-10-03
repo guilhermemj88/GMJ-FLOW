@@ -1321,7 +1321,8 @@ class MediaCgnatPayloadTest(MediaBase):
         template = (
             '{"event": "{{event}}", "id": {{event_id}}, "resolved": {{cgnat_resolved}}, '
             '"private_ip": "{{cgnat_private_ip}}", "public": "{{cgnat_public_ip}}:{{cgnat_public_port}}", '
-            '"pool": "{{cgnat_pool_name}}", "device": "{{cgnat_device_name}}"}'
+            '"pool": "{{cgnat_pool_name}}", "device": "{{cgnat_device_name}}", '
+            '"confidence": {{cgnat_confidence}}}'
         )
         self._insert_destination(payload_template=template)
         media_dispatch.dispatch_media_event("anomaly_detected", self._event_4688())
@@ -1336,6 +1337,7 @@ class MediaCgnatPayloadTest(MediaBase):
                 "public": "179.189.80.242:20486",
                 "pool": "PUBLIC-POOL-01",
                 "device": "A10-FIBINET",
+                "confidence": 1.0,
             },
         )
 
@@ -1350,6 +1352,92 @@ class MediaCgnatPayloadTest(MediaBase):
         self.assertEqual(envelope["data"]["target_port"], 53)
         self.assertEqual(envelope["data"]["cgnat"]["private_ip"], "100.64.9.50")
 
+    def test_preview_enriches_cgnat_4688_without_sending(self):
+        """Preview admin: mesmo enrichment do envio; nunca dispara webhook."""
+        self._seed_cgnat()
+        body = backend_main.MediaTestEventPayload(
+            src_ip="179.189.80.242",
+            src_port=20486,
+            direction="transmits",
+            target_ip="54.233.253.229",
+            target_port=53,
+            protocol="udp",
+            vector_name="DNS_SINGLE_FLOW_OUTBOUND",
+            severity="warning",
+        )
+        with mock.patch.object(media_dispatch, "post_json") as post:
+            preview = backend_main.media_test_event_preview(body, request=None)
+        post.assert_not_called()  # preview continua sem enviar webhook real
+        payload_data = preview["payload"]["data"]
+        self.assertEqual(
+            payload_data.get("cgnat"),
+            {
+                "resolved": True,
+                "public_ip": "179.189.80.242",
+                "public_port": 20486,
+                "private_ip": "100.64.9.50",
+                "device_name": "A10-FIBINET",
+                "pool_name": "PUBLIC-POOL-01",
+                "confidence": 1.0,
+            },
+        )
+        for key in ("event_id", "top_src_ip", "top_src_port", "top_dst_ip", "top_dst_port"):
+            self.assertIn(key, payload_data)
+            self.assertIn(key, preview["data"])
+        self.assertEqual(payload_data["top_src_ip"], "179.189.80.242")
+        self.assertEqual(payload_data["top_src_port"], 20486)
+        self.assertEqual(payload_data["top_dst_ip"], "54.233.253.229")
+        self.assertEqual(payload_data["top_dst_port"], 53)
+        self.assertEqual(preview["data"]["cgnat"]["private_ip"], "100.64.9.50")
+        self.assertEqual(preview["data"]["cgnat_private_ip"], "100.64.9.50")
+
+    def test_test_event_send_enriches_cgnat_4688(self):
+        self._seed_cgnat()
+        self._insert_destination()
+        body = backend_main.MediaTestEventPayload(
+            src_ip="179.189.80.242",
+            src_port=20486,
+            direction="transmits",
+            target_ip="54.233.253.229",
+            target_port=53,
+            protocol="udp",
+            vector_name="DNS_SINGLE_FLOW_OUTBOUND",
+            severity="warning",
+        )
+        with mock.patch.object(
+            media_dispatch,
+            "post_json",
+            return_value={"ok": True, "http_status": 200, "duration_ms": 1, "error": ""},
+        ):
+            result = backend_main.media_test_event(body, request=None)
+        envelope = result["envelope"]
+        self.assertEqual(envelope["data"]["cgnat"]["private_ip"], "100.64.9.50")
+        self.assertEqual(envelope["data"]["cgnat"]["public_port"], 20486)
+        self.assertEqual(envelope["data"]["top_src_ip"], "179.189.80.242")
+        self.assertEqual(envelope["data"]["top_src_port"], 20486)
+
+    def test_preview_custom_template_with_cgnat_confidence(self):
+        self._seed_cgnat()
+        media_id = self._insert_destination(
+            payload_template=(
+                '{"event": "{{event}}", "private_ip": "{{cgnat_private_ip}}", '
+                '"confidence": {{cgnat_confidence}}, "resolved": {{cgnat_resolved}}}'
+            )
+        )
+        body = backend_main.MediaTestEventPayload(
+            src_ip="179.189.80.242",
+            src_port=20486,
+            direction="transmits",
+            target_ip="54.233.253.229",
+            target_port=53,
+            protocol="udp",
+            destination_id=media_id,
+        )
+        preview = backend_main.media_test_event_preview(body, request=None)
+        self.assertEqual(preview["payload"]["private_ip"], "100.64.9.50")
+        self.assertEqual(preview["payload"]["confidence"], 1.0)
+        self.assertIs(preview["payload"]["resolved"], True)
+
     def test_cgnat_placeholders_are_known_and_valid(self):
         for name in (
             "cgnat_resolved",
@@ -1358,10 +1446,11 @@ class MediaCgnatPayloadTest(MediaBase):
             "cgnat_private_ip",
             "cgnat_pool_name",
             "cgnat_device_name",
+            "cgnat_confidence",
         ):
             self.assertIn(name, media_dispatch.MEDIA_PLACEHOLDERS)
-        rendered = media_dispatch.validate_payload_template('{"x": "{{cgnat_private_ip}}"}')
-        self.assertEqual(json.loads(rendered), {"x": ""})
+        rendered = media_dispatch.validate_payload_template('{"x": "{{cgnat_private_ip}}", "c": {{cgnat_confidence}}}')
+        self.assertEqual(json.loads(rendered), {"x": "", "c": None})
 
 
 if __name__ == "__main__":

@@ -19,10 +19,11 @@ Payload publico: envelope versionado
 Os nomes internos (packets_s/bits_s/threshold_value...) sao preservados no
 `data` junto da serializacao publica `pps`/`bps` para o consumidor (n8n).
 
-O disparo real (anomaly_detected) aplica o MESMO enriquecimento CGNAT usado
-pelo Grafana (enrich_anomaly_event_with_cgnat). Quando ha match, o payload
-ganha campos aditivos `cgnat_*` e o objeto `data.cgnat`; quando nao ha match,
-nada e alterado (payload legado intacto).
+O disparo real (anomaly_detected) e as ferramentas administrativas de teste
+(preview/test-event) aplicam o MESMO enriquecimento CGNAT usado pelo Grafana
+(enrich_anomaly_event_with_cgnat). Quando ha match, o payload ganha campos
+aditivos `cgnat_*` e o objeto `data.cgnat`; quando nao ha match, nada e
+alterado (payload legado intacto).
 """
 
 from __future__ import annotations
@@ -57,8 +58,8 @@ MEDIA_PAYLOAD_VERSION = 1
 
 # Placeholders suportados pelo template editavel de payload. Cobrem os campos
 # do envelope + anomaly_event_data, o marcador `test` e os campos CGNAT
-# aditivos preenchidos no disparo real (ver enrich_payload_with_cgnat).
-# Substituicao declarativa: nada de expressoes/eval.
+# aditivos preenchidos no disparo real e no test/preview (ver
+# enrich_payload_with_cgnat). Substituicao declarativa: nada de expressoes/eval.
 MEDIA_PLACEHOLDERS = (
     "version",
     "event",
@@ -122,6 +123,7 @@ MEDIA_PLACEHOLDERS = (
     "cgnat_private_ip",
     "cgnat_pool_name",
     "cgnat_device_name",
+    "cgnat_confidence",
 )
 
 # Template padrao: reproduz 1:1 o payload que o GMJ-FLOW envia hoje. Campos
@@ -1127,6 +1129,7 @@ def enrich_payload_with_cgnat(
             "cgnat_private_ip": private_ip,
             "cgnat_pool_name": cgnat_block["pool_name"],
             "cgnat_device_name": cgnat_block["device_name"],
+            "cgnat_confidence": cgnat_block["confidence"],
         }
     )
     return payload_data, cgnat_block
@@ -1307,7 +1310,9 @@ def send_test_event(data: dict[str, Any]) -> dict[str, Any]:
     """Envia um evento de TESTE para os destinos ativos.
 
     Uso administrativo: NAO grava anomalia, NAO passa pelo detector e NAO aciona
-    mitigacao. Reaproveita exatamente o mesmo envio dos eventos reais.
+    mitigacao. Reaproveita exatamente o mesmo envio dos eventos reais, incluindo
+    o MESMO enriquecimento CGNAT (enrich_payload_with_cgnat): o envelope
+    devolvido expoe `data.cgnat` e os placeholders {{cgnat_*}} quando ha match.
 
     A chave "test" NAO e injetada: se o template do destino declarar
     "test": {{test}}, ela vira true aqui (e false em producao); se nao declarar,
@@ -1324,27 +1329,31 @@ def send_test_event(data: dict[str, Any]) -> dict[str, Any]:
     payload_data.update(dict(data or {}))
     results: list[dict[str, Any]] = []
     representative: Any = None
+    cgnat_block: dict[str, Any] | None = None
     severity = clean_text(payload_data.get("severity")) or "info"
     sensor_id = payload_data.get("sensor_id")
 
     def _representative(template_value: str) -> Any:
         try:
-            return render_payload_from_template(
+            envelope = render_payload_from_template(
                 template_value or DEFAULT_PAYLOAD_TEMPLATE,
                 payload_data,
                 event_type="anomaly_detected",
                 is_test=True,
             )
         except MediaTemplateError:
-            return render_payload_from_template(
+            envelope = render_payload_from_template(
                 DEFAULT_PAYLOAD_TEMPLATE, payload_data, event_type="anomaly_detected", is_test=True
             )
+        return inject_cgnat_block(envelope, cgnat_block)
 
     try:
         conn = connect()
         try:
             rows = conn.execute("SELECT * FROM media_integrations ORDER BY id").fetchall()
             sensor_map = load_destination_sensor_map(conn)
+            # Mesmo enriquecimento CGNAT do envio real (reuso; nada duplicado).
+            payload_data, cgnat_block = enrich_payload_with_cgnat(conn, payload_data)
         finally:
             conn.close()
         for row in rows:

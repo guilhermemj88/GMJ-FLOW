@@ -29023,7 +29023,8 @@ def media_test_event_preview(payload: MediaTestEventPayload, request: Request):
     """Renderiza o payload de teste sem enviar nada.
 
     Usa o template do destino informado em `destination_id`; sem destino, usa o
-    template padrao. Sempre com test=true (mesmo caminho do envio real).
+    template padrao. Sempre com test=true (mesmo caminho do envio real),
+    incluindo o MESMO enriquecimento CGNAT (o preview nunca envia webhook).
     """
     require_permission(request, "settings.manage")
     ensure_sensor_db()
@@ -29034,6 +29035,10 @@ def media_test_event_preview(payload: MediaTestEventPayload, request: Request):
         # formulario; o preview renderiza exatamente a mesma base.
         merged = dict(media_dispatch.TEST_SAMPLE_EVENT)
         merged.update(data)
+        # Enriquecimento CGNAT identico ao envio real (reuso; sem regra nova).
+        merged, cgnat_block = media_dispatch.enrich_payload_with_cgnat(conn, merged)
+        if cgnat_block is not None:
+            merged["cgnat"] = cgnat_block
         template = media_dispatch.DEFAULT_PAYLOAD_TEMPLATE
         destination_id = getattr(payload, "destination_id", None)
         if destination_id:
@@ -29049,6 +29054,7 @@ def media_test_event_preview(payload: MediaTestEventPayload, request: Request):
         rendered = media_dispatch.render_payload_from_template(
             template, merged, event_type="anomaly_detected", is_test=True
         )
+        rendered = media_dispatch.inject_cgnat_block(rendered, cgnat_block)
     except media_dispatch.MediaTemplateError as exc:
         raise HTTPException(status_code=400, detail=f"Payload invalido: {exc}") from exc
     return {
