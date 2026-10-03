@@ -18,6 +18,11 @@ Payload publico: envelope versionado
 
 Os nomes internos (packets_s/bits_s/threshold_value...) sao preservados no
 `data` junto da serializacao publica `pps`/`bps` para o consumidor (n8n).
+
+O disparo real (anomaly_detected) aplica o MESMO enriquecimento CGNAT usado
+pelo Grafana (enrich_anomaly_event_with_cgnat). Quando ha match, o payload
+ganha campos aditivos `cgnat_*` e o objeto `data.cgnat`; quando nao ha match,
+nada e alterado (payload legado intacto).
 """
 
 from __future__ import annotations
@@ -50,9 +55,10 @@ MEDIA_SEVERITY_ORDER = ("info", "warning", "critical")
 
 MEDIA_PAYLOAD_VERSION = 1
 
-# Placeholders suportados pelo template editavel de payload. Sao exatamente os
-# campos que o GMJ-FLOW ja produz hoje (envelope + anomaly_event_data), mais o
-# marcador `test`. Substituicao declarativa: nada de expressoes/eval.
+# Placeholders suportados pelo template editavel de payload. Cobrem os campos
+# do envelope + anomaly_event_data, o marcador `test` e os campos CGNAT
+# aditivos preenchidos no disparo real (ver enrich_payload_with_cgnat).
+# Substituicao declarativa: nada de expressoes/eval.
 MEDIA_PLACEHOLDERS = (
     "version",
     "event",
@@ -109,6 +115,13 @@ MEDIA_PLACEHOLDERS = (
     "zone_name",
     "summary",
     "dedupe_key",
+    # CGNAT: preenchidos apenas quando o disparo real resolve o assinante.
+    "cgnat_resolved",
+    "cgnat_public_ip",
+    "cgnat_public_port",
+    "cgnat_private_ip",
+    "cgnat_pool_name",
+    "cgnat_device_name",
 )
 
 # Template padrao: reproduz 1:1 o payload que o GMJ-FLOW envia hoje. Campos
@@ -1038,6 +1051,103 @@ def flush_pending_created(conn: sqlite3.Connection | None = None) -> dict[str, A
     return summary
 
 
+# ---------------------------------------------------------------------------
+# CGNAT: enriquecimento aditivo reutilizando o MESMO resolver do Grafana
+# ---------------------------------------------------------------------------
+# O resolver canonico (enrich_anomaly_event_with_cgnat ->
+# resolve_cgnat_subscriber) vive no modulo principal e e exatamente o mesmo
+# usado pelas rotas do Grafana. O import e tardio (via sys.modules) porque o
+# modulo principal importa este modulo durante o startup.
+_CGNAT_ENRICHER_MODULES = ("app.main", "backend.app.main", "main", "backend_main")
+
+
+def _cgnat_enricher():
+    """Devolve enrich_anomaly_event_with_cgnat sem criar import circular."""
+    import sys
+
+    for name in _CGNAT_ENRICHER_MODULES:
+        module = sys.modules.get(name)
+        if module is None:
+            continue
+        enricher = getattr(module, "enrich_anomaly_event_with_cgnat", None)
+        if callable(enricher):
+            return enricher
+    return None
+
+
+def enrich_payload_with_cgnat(
+    conn: sqlite3.Connection,
+    data: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """Aplica o enrichment CGNAT do Grafana ao payload de midia (best-effort).
+
+    Nenhuma regra de lookup e duplicada: a resolucao public_ip/porta -> IP
+    privado fica inteiramente em enrich_anomaly_event_with_cgnat. Devolve
+    (payload_data, cgnat_block):
+      - sem match ou enricher indisponivel: copia intacta de `data` + None,
+        preservando o payload legado;
+      - com match unico: copia de `data` + campos cgnat_* (para os placeholders)
+        + bloco canonico para injetar no envelope.
+    Nunca levanta excecao.
+    """
+    original = dict(data or {})
+    enricher = _cgnat_enricher()
+    if enricher is None:
+        return original, None
+    try:
+        enriched = enricher(conn, dict(original))
+    except Exception:
+        return original, None
+    if not enriched.get("cgnat_matched") or enriched.get("cgnat_ambiguous"):
+        return original, None
+    private_ip = clean_text(enriched.get("private_ip"))
+    if not private_ip:
+        return original, None
+    public_port = None
+    if enriched.get("public_port") not in (None, ""):
+        try:
+            public_port = int(enriched.get("public_port"))
+        except (TypeError, ValueError):
+            public_port = None
+    cgnat_block = {
+        "resolved": True,
+        "public_ip": clean_text(enriched.get("public_ip")),
+        "public_port": public_port,
+        "private_ip": private_ip,
+        "device_name": clean_text(enriched.get("cgnat_device_name")),
+        "pool_name": clean_text(enriched.get("cgnat_pool_name")),
+        "confidence": _as_float(enriched.get("cgnat_confidence")),
+    }
+    payload_data = dict(original)
+    payload_data.update(
+        {
+            "cgnat_resolved": True,
+            "cgnat_public_ip": cgnat_block["public_ip"],
+            "cgnat_public_port": public_port,
+            "cgnat_private_ip": private_ip,
+            "cgnat_pool_name": cgnat_block["pool_name"],
+            "cgnat_device_name": cgnat_block["device_name"],
+        }
+    )
+    return payload_data, cgnat_block
+
+
+def inject_cgnat_block(envelope: Any, cgnat_block: dict[str, Any] | None) -> Any:
+    """Acrescenta `data.cgnat` ao envelope renderizado, de forma aditiva.
+
+    Age somente com match CGNAT e quando o envelope possui um objeto `data`
+    (template padrao ou template customizado que mantem a secao `data`).
+    Templates que reestruturam o payload podem optar pelos placeholders
+    {{cgnat_*}}; sem match CGNAT nada e alterado.
+    """
+    if not cgnat_block or not isinstance(envelope, dict):
+        return envelope
+    section = envelope.get("data")
+    if isinstance(section, dict) and "cgnat" not in section:
+        section["cgnat"] = cgnat_block
+    return envelope
+
+
 def dispatch_media_event(
     event_type: str,
     data: dict[str, Any],
@@ -1062,6 +1172,13 @@ def dispatch_media_event(
         try:
             rows = conn.execute("SELECT * FROM media_integrations ORDER BY id").fetchall()
             sensor_map = load_destination_sensor_map(conn)
+            payload_data = dict(data or {})
+            if event_id and not _as_int(payload_data.get("event_id")):
+                payload_data["event_id"] = _as_int(event_id)
+            cgnat_block: dict[str, Any] | None = None
+            if rows:
+                # Enriquecimento aditivo com o MESMO resolver CGNAT do Grafana.
+                payload_data, cgnat_block = enrich_payload_with_cgnat(conn, payload_data)
         finally:
             conn.close()
         for row in rows:
@@ -1081,14 +1198,15 @@ def dispatch_media_event(
                 url = validate_webhook_url(item.get("url"))
                 template = clean_text(item.get("payload_template")) or DEFAULT_PAYLOAD_TEMPLATE
                 try:
-                    envelope = render_payload_from_template(template, data or {}, event_type=event_key)
+                    envelope = render_payload_from_template(template, payload_data, event_type=event_key)
                 except MediaTemplateError as exc:
                     summary["errors"].append(
                         f"destino {item.get('id')}: template invalido ({exc}); usando padrao"
                     )
                     envelope = render_payload_from_template(
-                        DEFAULT_PAYLOAD_TEMPLATE, data or {}, event_type=event_key
+                        DEFAULT_PAYLOAD_TEMPLATE, payload_data, event_type=event_key
                     )
+                envelope = inject_cgnat_block(envelope, cgnat_block)
                 job = {
                     "media_id": int(item["id"]),
                     "event_id": int(event_id) if event_id else None,

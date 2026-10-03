@@ -1179,5 +1179,190 @@ class MediaTestEventTest(MediaBase):
             with self.assertRaises(backend_main.HTTPException):
                 backend_main.media_test_event(body, request=None)
 
+
+class MediaCgnatPayloadTest(MediaBase):
+    """CGNAT no payload de midia: reuso do enrichment do Grafana, aditivo (A-H)."""
+
+    def _seed_cgnat(self):
+        """Reproduz as faixas reais do publico 179.189.80.242 (caso event_id 4688)."""
+        with backend_main.sqlite_connection() as conn:
+            backend_main.ensure_cgnat_schema(conn)
+            now = "2026-10-03T12:00:00Z"
+            cursor = conn.execute(
+                """
+                INSERT INTO cgnat_import_batches
+                    (filename, original_filename, file_hash, status, created_at, activated_at, approved_at, total_rows, valid_rows)
+                VALUES (?, ?, ?, 'active', ?, ?, ?, 3, 3)
+                """,
+                ("a10-cgnat.txt", "a10-cgnat.txt", "cgnat-test-hash", now, now, now),
+            )
+            batch_id = int(cursor.lastrowid)
+            for private_ip, port_start, port_end in (
+                ("100.64.9.18", 17152, 19167),
+                ("100.64.9.50", 19168, 21183),
+                ("100.64.9.82", 21184, 23199),
+            ):
+                conn.execute(
+                    """
+                    INSERT INTO cgnat_port_mappings
+                        (batch_id, source_type, source_filename, device_name, pool_name, public_ip, private_ip,
+                         protocol, port_start, port_end, active, confidence, created_at, updated_at)
+                    VALUES (?, 'a10', 'a10-cgnat.txt', 'A10-FIBINET', 'PUBLIC-POOL-01', ?, ?, 'udp', ?, ?, 1, 1.0, ?, ?)
+                    """,
+                    (batch_id, "179.189.80.242", private_ip, port_start, port_end, now, now),
+                )
+            conn.commit()
+
+    def _insert_destination(self, **overrides):
+        values = {
+            "name": overrides.pop("name", "webhook midia"),
+            "type": "webhook",
+            "url": overrides.pop("url", "http://10.0.0.5:5678/webhook"),
+            "active": 1,
+            "all_sensors": 1,
+            "payload_template": overrides.pop("payload_template", None),
+            "event_types": json.dumps(["anomaly_detected"]),
+            "minimum_severity": "info",
+            "timeout_seconds": 5,
+            "secret_encrypted": "",
+            "secret_header": "X-GMJ-Flow-Token",
+            "created_at": "2026-10-03T00:00:00Z",
+            "updated_at": "2026-10-03T00:00:00Z",
+        }
+        values.update(overrides)
+        with backend_main.sqlite_connection() as conn:
+            cursor = backend_main.sqlite_insert_dict(conn, "media_integrations", values)
+            conn.commit()
+            return int(cursor.lastrowid)
+
+    def _drain(self):
+        jobs = []
+        while not media_dispatch._QUEUE.empty():
+            jobs.append(media_dispatch._QUEUE.get_nowait())
+            media_dispatch._QUEUE.task_done()
+        return jobs
+
+    def _event_4688(self, **overrides):
+        data = dict(media_dispatch.TEST_SAMPLE_EVENT)
+        data.update(
+            {
+                "event_id": 4688,
+                "status": "open",
+                "target_ip": "179.189.80.242",
+                "target_cidr": "179.189.80.242/32",
+                "target_port": 53,
+                "target_role": "src_ip",
+                "protocol": "udp",
+                "vector_name": "DNS_SINGLE_FLOW_OUTBOUND",
+                "display_name": "DNS Single Flow Outbound",
+                "severity": "warning",
+                "direction": "transmits",
+                "top_src_ip": "179.189.80.242",
+                "top_src_port": 20486,
+                "top_dst_ip": "54.233.253.229",
+                "top_dst_port": 53,
+                "sensor": "NE8000-BGP-FIBINET",
+                "sensor_name": "NE8000-BGP-FIBINET",
+                "exporter_ip": "179.189.80.0",
+                "last_seen_at": "2026-10-03T12:01:00Z",
+            }
+        )
+        data.update(overrides)
+        return data
+
+    def test_outbound_transmits_4688_resolves_private_ip(self):
+        """transmits usa top_src_ip + top_src_port: 20486 -> 100.64.9.50."""
+        self._seed_cgnat()
+        self._insert_destination()
+        media_dispatch.dispatch_media_event("anomaly_detected", self._event_4688())
+        envelope = self._drain()[0]["envelope"]
+        self.assertEqual(
+            envelope["data"].get("cgnat"),
+            {
+                "resolved": True,
+                "public_ip": "179.189.80.242",
+                "public_port": 20486,
+                "private_ip": "100.64.9.50",
+                "device_name": "A10-FIBINET",
+                "pool_name": "PUBLIC-POOL-01",
+                "confidence": 1.0,
+            },
+        )
+        # Campos originais preservados (aditivo) e event_id explicito no payload.
+        self.assertEqual(envelope["data"]["top_src_port"], 20486)
+        self.assertEqual(envelope["data"]["target_port"], 53)
+        self.assertEqual(envelope["data"]["event_id"], 4688)
+
+    def test_target_port_53_is_never_used_for_cgnat_lookup(self):
+        """Sem top_src_port, target_port=53 nao pode resolver CGNAT."""
+        self._seed_cgnat()
+        self._insert_destination()
+        media_dispatch.dispatch_media_event("anomaly_detected", self._event_4688(top_src_port=None))
+        envelope = self._drain()[0]["envelope"]
+        self.assertNotIn("cgnat", envelope["data"])
+        self.assertEqual(envelope["data"]["target_port"], 53)
+
+    def test_no_match_keeps_legacy_payload_byte_identical(self):
+        self._seed_cgnat()
+        self._insert_destination()
+        data = self._event_4688(
+            top_src_ip="203.0.113.10",
+            top_src_port=50000,
+            target_ip="203.0.113.10",
+            target_cidr="203.0.113.10/32",
+        )
+        media_dispatch.dispatch_media_event("anomaly_detected", data)
+        envelope = self._drain()[0]["envelope"]
+        self.assertNotIn("cgnat", envelope["data"])
+        self.assertEqual(envelope["data"], data)
+
+    def test_cgnat_placeholders_and_event_id_in_template(self):
+        self._seed_cgnat()
+        template = (
+            '{"event": "{{event}}", "id": {{event_id}}, "resolved": {{cgnat_resolved}}, '
+            '"private_ip": "{{cgnat_private_ip}}", "public": "{{cgnat_public_ip}}:{{cgnat_public_port}}", '
+            '"pool": "{{cgnat_pool_name}}", "device": "{{cgnat_device_name}}"}'
+        )
+        self._insert_destination(payload_template=template)
+        media_dispatch.dispatch_media_event("anomaly_detected", self._event_4688())
+        envelope = self._drain()[0]["envelope"]
+        self.assertEqual(
+            envelope,
+            {
+                "event": "anomaly_detected",
+                "id": 4688,
+                "resolved": True,
+                "private_ip": "100.64.9.50",
+                "public": "179.189.80.242:20486",
+                "pool": "PUBLIC-POOL-01",
+                "device": "A10-FIBINET",
+            },
+        )
+
+    def test_additive_object_keeps_custom_data_fields(self):
+        self._seed_cgnat()
+        template = '{"event": "{{event}}", "data": {"target_ip": "{{target_ip}}", "target_port": {{target_port}}}}'
+        self._insert_destination(payload_template=template)
+        media_dispatch.dispatch_media_event("anomaly_detected", self._event_4688())
+        envelope = self._drain()[0]["envelope"]
+        self.assertEqual(envelope["event"], "anomaly_detected")
+        self.assertEqual(envelope["data"]["target_ip"], "179.189.80.242")
+        self.assertEqual(envelope["data"]["target_port"], 53)
+        self.assertEqual(envelope["data"]["cgnat"]["private_ip"], "100.64.9.50")
+
+    def test_cgnat_placeholders_are_known_and_valid(self):
+        for name in (
+            "cgnat_resolved",
+            "cgnat_public_ip",
+            "cgnat_public_port",
+            "cgnat_private_ip",
+            "cgnat_pool_name",
+            "cgnat_device_name",
+        ):
+            self.assertIn(name, media_dispatch.MEDIA_PLACEHOLDERS)
+        rendered = media_dispatch.validate_payload_template('{"x": "{{cgnat_private_ip}}"}')
+        self.assertEqual(json.loads(rendered), {"x": ""})
+
+
 if __name__ == "__main__":
     unittest.main()
