@@ -540,3 +540,27 @@ table.v2-dense tbody tr:hover td{background:#0d1a29}
 }
 .v2-expression-status{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 .v2-expression-examples{display:flex;flex-wrap:wrap;gap:5px}
+
+/* ------------------- Badges de anomalias na sidebar (paridade V1) ------------------- */
+.nav-item .nav-label{flex:1 1 auto;min-width:0}
+.nav-badges{display:inline-flex;align-items:center;gap:4px;margin-left:6px}
+.nav-badge{
+  display:none;align-items:center;justify-content:center;min-width:22px;height:20px;padding:0 6px;
+  border-radius:999px;background:var(--info);color:#03202a;font-size:10px;font-weight:800;line-height:1;
+}
+.nav-badge.active{display:inline-flex;animation:anomalyPulse 1.6s ease-in-out infinite}
+.nav-badge.error{display:inline-flex;background:var(--critical);color:#2a0208;animation:none}
+@keyframes anomalyPulse{
+  0%,100%{box-shadow:0 0 0 0 rgba(56,189,248,.55)}
+  50%{box-shadow:0 0 0 6px rgba(56,189,248,0)}
+}
+.nav-anomaly-severity{display:none;align-items:center;gap:4px}
+.nav-anomaly-severity.active{display:inline-flex}
+.nav-severity-count{
+  display:inline-flex;align-items:center;justify-content:center;min-width:19px;height:19px;padding:0 5px;
+  border:1px solid currentColor;border-radius:999px;font-size:10px;font-weight:800;line-height:1;
+}
+.nav-severity-count.severity-warning{color:var(--warning);background:rgba(251,191,36,.12)}
+.nav-severity-count.severity-critical{color:var(--critical);background:rgba(251,113,133,.12)}
+.nav-item.has-anomalies{color:var(--text);background:rgba(251,113,133,.10)}
+.nav-item.has-anomalies.active{background:var(--sidebar2)}

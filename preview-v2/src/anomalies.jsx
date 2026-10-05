@@ -136,7 +136,7 @@ function mitigationLabel(item) {
 
 /* --------------------------------- Root --------------------------------- */
 
-export default function Anomalias({ focus, onNavigate }) {
+export default function Anomalias({ focus, onNavigate, anomalySummary }) {
   const [tab, setTab] = useState('active');
   /**
    * Cross-link do BLOCO 1 (Mitigação / BGP → Anomalias): abre o drawer da
@@ -155,7 +155,9 @@ export default function Anomalias({ focus, onNavigate }) {
     setLinkedRow(null);
     if (linkedRow && onNavigate) onNavigate('anomalies', null);
   };
-  const summary = useApi('/api/anomalies/summary');
+  // Mesma fonte dos badges da sidebar (o App injeta o resumo global; sem requisição duplicada).
+  const localSummary = useApi('/api/anomalies/summary', { enabled: !anomalySummary });
+  const summary = anomalySummary || localSummary;
   const s = summary.data || {};
   const isActiveTab = tab === 'active';
 

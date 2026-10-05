@@ -5,7 +5,7 @@ import './preview.css';
 import {
   Badge, ErrorBox, Loading, Panel, Table,
   api, setToken, token, useApi, hasPermission, ENV_LABEL,
-  fmtBits, fmtPps, fmtTime, statusTone,
+  fmtBits, fmtNumber, fmtPps, fmtTime, statusTone, useAnomalySummary,
 } from './shared.jsx';
 import Threat from './threat.jsx';
 import Anomalias from './anomalies.jsx';
@@ -183,7 +183,38 @@ function Login({ onSuccess }) {
   );
 }
 
-function Sidebar({ page, setPage, user }) {
+/** Contagens do resumo global (aceita chaves canônicas e legadas, como a V1). */
+function anomalyBadgeCounts(summary) {
+  const data = summary?.data || {};
+  return {
+    total: Number(data.active_total ?? data.active_count ?? data.active_anomalies ?? 0),
+    warning: Number(data.active_warning ?? data.warning_count ?? 0),
+    critical: Number(data.active_critical ?? data.critical_count ?? 0),
+  };
+}
+
+/**
+ * Indicadores de anomalias na navegação lateral — paridade com a V1:
+ * total de ativas + warnings + críticas, com tooltip único.
+ * Sem anomalias ativas nada é exibido (mesmo comportamento da V1).
+ */
+function AnomalyNavBadges({ summary }) {
+  const { total, warning, critical } = anomalyBadgeCounts(summary);
+  if (!summary?.data && summary?.error) {
+    return <span className="nav-badge error" title={`Resumo de anomalias indisponível: ${summary.error}`}>!</span>;
+  }
+  return (
+    <span className="nav-badges">
+      <span className={`nav-badge${total > 0 ? ' active' : ''}`}>{fmtNumber(total)}</span>
+      <span className={`nav-anomaly-severity${total > 0 ? ' active' : ''}`} aria-hidden="true">
+        <span className="nav-severity-count severity-warning" title="Avisos ativos">{fmtNumber(warning)}</span>
+        <span className="nav-severity-count severity-critical" title="Anomalias críticas ativas">{fmtNumber(critical)}</span>
+      </span>
+    </span>
+  );
+}
+
+function Sidebar({ page, setPage, user, anomalySummary }) {
   const groups = [
     { label: 'Visão geral', items: [['Dashboard', 'dashboard'], ['Flows', 'flows'], ['Sensores', 'sensors'], ['Interfaces', 'interfaces'], ['Mapa Global', 'gmaps'], ['Clientes / Zonas', 'zones']] },
     { label: 'Segurança', items: [['Anomalias', 'anomalies'], ['Peak Hunter', 'peak'], ['Threat Intelligence', 'threat'], ['Alertas', 'alerts'], ['Mitigação', 'mitigation'], ['BGP / Conectores', 'bgp'], ['Vetores de Ataque', 'vectors']] },
@@ -199,6 +230,8 @@ function Sidebar({ page, setPage, user }) {
       items: group.items.filter(([, id]) => id !== 'users' || hasPermission(user, 'users.view')),
     }))
     .filter((group) => group.items.length > 0);
+  const anomalies = anomalyBadgeCounts(anomalySummary);
+  const anomalyTooltip = `${fmtNumber(anomalies.total)} anomalias ativas: ${fmtNumber(anomalies.warning)} avisos e ${fmtNumber(anomalies.critical)} críticas`;
   return (
     <aside className="sidebar">
       <div className="brand"><div className="brand-mark">G</div><div><b>GMJ-FLOW</b><small>NETWORK CONTROL PLANE</small></div></div>
@@ -207,7 +240,16 @@ function Sidebar({ page, setPage, user }) {
         <div className="nav-group" key={group.label}>
           <p>{group.label}</p>
           {group.items.map(([label, id]) => (
-            <button key={id} className={page === id ? 'nav-item active' : 'nav-item'} onClick={() => setPage(id)}><span>{label}</span></button>
+            <button
+              key={id}
+              className={`nav-item${page === id ? ' active' : ''}${id === 'anomalies' && anomalies.total > 0 ? ' has-anomalies' : ''}`}
+              onClick={() => setPage(id)}
+              title={id === 'anomalies' ? anomalyTooltip : undefined}
+              aria-label={id === 'anomalies' ? `Anomalias. ${anomalyTooltip}` : undefined}
+            >
+              <span className="nav-label">{label}</span>
+              {id === 'anomalies' ? <AnomalyNavBadges summary={anomalySummary} /> : null}
+            </button>
           ))}
         </div>
       ))}
@@ -547,6 +589,10 @@ function App() {
   const [focus, setFocus] = useState(null);
   const [bootstrapping, setBootstrapping] = useState(Boolean(token()));
 
+  // Fonte ÚNICA do resumo de anomalias: alimenta os badges da sidebar e a tela de
+  // Anomalias, com refresh global (intervalo do motor) — sem requisição duplicada.
+  const anomalySummary = useAnomalySummary({ enabled: authed && Boolean(user) });
+
   useEffect(() => {
     const onExpired = () => setAuthed(false);
     window.addEventListener('gmjflow-auth-expired', onExpired);
@@ -587,7 +633,7 @@ function App() {
   };
   const pages = {
     dashboard: <Dashboard />,
-    anomalies: <Anomalias focus={focus} onNavigate={navigate} />,
+    anomalies: <Anomalias focus={focus} onNavigate={navigate} anomalySummary={anomalySummary} />,
     mitigation: <Mitigation focus={focus} onNavigate={navigate} />,
     bgp: <Bgp focus={focus} onNavigate={navigate} />,
     sensors: <SensorsPage onNavigate={navigate} />,
@@ -611,7 +657,7 @@ function App() {
   const activePage = page === 'users' && !hasPermission(user, 'users.view') ? 'dashboard' : page;
   return (
     <div className="app-shell">
-      <Sidebar page={activePage} setPage={goToPage} user={user} />
+      <Sidebar page={activePage} setPage={goToPage} user={user} anomalySummary={anomalySummary} />
       <main className="main">
         <Header page={activePage} onLogout={logout} />
         {pages[activePage] || pages.dashboard}

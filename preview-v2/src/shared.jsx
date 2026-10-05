@@ -116,6 +116,49 @@ export function useApi(path, { enabled = true, deps = [] } = {}) {
   return state;
 }
 
+/**
+ * Resumo global de anomalias (ativos / warnings / críticas) para badges da navegação.
+ *
+ * Fonte: GET /api/anomalies/summary — o MESMO endpoint já usado pela tela de
+ * Anomalias (nenhuma lógica de detecção nova, nenhuma contagem inventada no front).
+ * Atualiza sozinho no intervalo global (default 30 s, igual ao intervalo do motor
+ * de anomalias), então a sidebar acompanha o refresh sem recarregar a página.
+ */
+export const ANOMALY_SUMMARY_INTERVAL_MS = 30000;
+
+export function useAnomalySummary({ enabled = true, intervalMs = ANOMALY_SUMMARY_INTERVAL_MS } = {}) {
+  const [state, setState] = useState({ data: null, loading: Boolean(enabled), error: null, updatedAt: 0 });
+  const seq = useRef(0);
+  const load = useRef(async () => {
+    const id = ++seq.current;
+    try {
+      const data = await api('/api/anomalies/summary');
+      if (seq.current === id) setState({ data, loading: false, error: null, updatedAt: Date.now() });
+    } catch (err) {
+      if (seq.current === id) {
+        setState((prev) => ({ data: prev.data, loading: false, error: err.message, updatedAt: prev.updatedAt }));
+      }
+    }
+  });
+
+  useEffect(() => {
+    if (!enabled) {
+      seq.current += 1;
+      setState({ data: null, loading: false, error: null, updatedAt: 0 });
+      return undefined;
+    }
+    setState((prev) => ({ ...prev, loading: true }));
+    load.current();
+    const timer = setInterval(() => load.current(), Math.max(5000, Number(intervalMs) || ANOMALY_SUMMARY_INTERVAL_MS));
+    return () => {
+      clearInterval(timer);
+      seq.current += 1;
+    };
+  }, [enabled, intervalMs]);
+
+  return { ...state, refresh: () => load.current() };
+}
+
 export function Loading() { return <div className="subtle" style={{ padding: '14px 16px' }}>Carregando dados reais…</div>; }
 
 export function ErrorBox({ message }) {
