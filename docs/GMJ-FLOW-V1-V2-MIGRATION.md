@@ -73,7 +73,7 @@ Este é o documento **canônico** para qualquer IA/agente responder:
 
 ---
 
-## 3. Inventário atual da V2 (20 telas)
+## 3. Inventário atual da V2 (21 telas)
 
 Extraído do bundle servido em `:8081`:
 
@@ -82,8 +82,9 @@ Extraído do bundle servido em `:8081`:
 - **Rede / Classificação:** Codecs, Prefixos, CGNAT
 - **Integrações:** Mídia
 - **Plataforma:** Banco, Sistema
+- **Administração:** Usuários e Acessos *(novo no P0-A — listagem somente leitura, 2026-10-05)*
 
-A V1 tem 21 itens de navegação; **não existem na V2: IA, Usuários e Acessos, Minha Conta**.
+A V1 tem 21 itens de navegação; **não existem na V2: IA e Minha Conta**. Usuários e Acessos entrou na V2 no **P0-A** (somente listagem read-only; detalhe/permissões e escrita pendentes).
 
 ---
 
@@ -130,7 +131,8 @@ Classificação: **A** redesign · **B** reorganizado · **C** gap real · **D**
 | Sistema | Resources/disk-guard/cache/exabgp | Sim | `system` | A | 200 | — |
 | Sistema | Containers | Sim | `system` | **D** | `GET /api/system/containers` → `items=0` **também na V1** (endpoint sem dados; não é gap da V2) | Baixo |
 | **IA** | Providers/rotas/prompts/playground/modelos/settings/audit | **Não** | — | **C** | sem rota `ai`; **0 refs** a `/api/ai/*` no bundle; V1 usa ~20 endpoints `/api/ai/*` | **Alto** |
-| **Usuários/Acessos** | CRUD/papéis/permissões/reset/revoke/audit | **Não** | — | **C** | sem rota; **0 refs** a `/api/v1/users*`; V1 tem `view-users`, `userEditorModal`, `newUserButton`, `saveUserButton` | **Alto** |
+| **Usuários/Acessos** | **Listagem** (usuários + perfis/permissões, filtros, paginação) | **Sim (P0-A)** | `users` | **A** | rota `users` na sidebar (grupo *Administração*); consome `GET /api/v1/users|roles|permissions`; validado no :8081 em 2026-10-05 | Médio |
+| **Usuários/Acessos** | Detalhe/matriz de permissões/escrita (criar, editar, reset, revoke, excluir, perfis, auditoria) | **Não** | — | **C** | V2 tem apenas ações como `ReadOnlyAction`; faltam P0-B (detalhe+matriz) e P0-D (escrita) | **Alto** |
 | **Minha Conta** | Trocar senha/sessões/revogar | **Não** | — | **C** | 0 refs a `/api/auth/change-password`, `/api/auth/logout`, `/api/v1/auth/sessions|revoke-sessions` | **Alto** |
 | Configurações | Templates/whitelist de detecção | Sim (leitura) | `prefixes`/`vectors` | **A/F** | consome `/api/detection/templates|whitelist|status`; `POST /api/detection/whitelist` = ReadOnlyAction | Médio |
 | Configurações | run-now / apply collectors / config efetiva | Não | — | **C/F** | 0 refs a `/api/detection/run-now`, `/api/collectors/apply`, `/api/config/effective` | Médio |
@@ -229,7 +231,7 @@ Campos: **ID · prioridade · status · descrição · endpoints · arquivos env
 | ID | Pri | Status | Descrição | Endpoints | Arquivos | Testes necessários | Commit | Data | Obs. |
 |---|---|---|---|---|---|---|---|---|---|
 | MIG-001 | P0 | TODO | Área de IA na V2 | `/api/ai/overview`, `/api/ai/providers*`, `/api/ai/routes*`, `/api/ai/prompts*`, `/api/ai/playground`, `/api/ai/settings/central`, `/api/ai/audit`, `/api/ai/history`, `/api/ai/models` | V2 (`src/*`), `backend/app/services/ai_integration.py`, `backend/app/main.py` | GETs reais + fluxo provider/rota/prompt; UI read-only | — | 2026-10-05 | Auditado no servidor real em 2026-10-04. Escrever só quando a V2 tiver backend de escrita. |
-| MIG-002 | P0 | TODO | Usuários e Acessos | `/api/v1/users`, `/api/v1/users/{id}`, `/api/v1/users/{id}/reset-password`, `/api/v1/users/{id}/revoke-sessions`, `/api/v1/audit/users/{id}` | V2, `backend/app/services/auth_access.py`, `backend/app/main.py` | CRUD + permissões + reset; RBAC | — | 2026-10-05 | **Path correto: `/api/v1/users`** (não `/api/users`). |
+| MIG-002 | P0 | EM_IMPLEMENTACAO | Usuários e Acessos (**P0-A entregue**: estrutura/nav + listagem read-only) | Entregues: `GET /api/v1/users` (offset/limit/search/status/role), `GET /api/v1/roles`, `GET /api/v1/permissions`. Pendentes (P0-B/P0-D): `/api/v1/users/{id}`, `/reset-password`, `/revoke-sessions`, `/enable|/disable`, `DELETE`, `/api/v1/roles[/{id}]`, `/api/v1/audit[/users/{id}]` | V2: `src/users.jsx` (novo), `src/shared.jsx` (`hasPermission`), `src/main.jsx` (nav/gate `users.view`/rota/header); backend sem alteração (`auth_access.py`, `main.py`) | P0-A ✔ GETs reais no :8081, filtros, paginação, gate `users.view`, 8 colunas, ReadOnlyAction sem escrita; pendentes: matriz de permissões (P0-B) e escrita (P0-D) | `docs: update MIG-002 with P0-A delivery` | 2026-10-05 | **P0-A validado no servidor real em 2026-10-05**: nav com gate, tabela com as 8 colunas, 1 usuário real (`admin`/Administrador), 8 `ReadOnlyAction`, 0 erros de console/HTTP, nenhuma escrita. **Path correto: `/api/v1/users`** (não `/api/users`). |
 | MIG-003 | P0 | TODO | Minha Conta | `/api/v1/auth/me`, `/api/v1/auth/change-password`, `/api/v1/auth/sessions`, `/api/v1/auth/revoke-sessions` | V2, `backend/app/services/auth_access.py` | troca de senha + sessões | — | 2026-10-05 | — |
 | MIG-004 | P0 | TODO | Editor de Dashboards | `/api/dashboards*`, `/api/dashboard-widgets/query|preview`, `/api/dashboards/widget-catalog`, `/api/dashboards/import/grafana`, `/api/dashboards/{id}/export/grafana`, `/api/dashboards/{id}/layout`, `/api/dashboards/migrate-legacy-layout` | V2, `frontend/*dashboard*`, `docs/dashboard-prefixes-grafana-phase1.md` | CRUD + import/export + layout | — | 2026-10-05 | Consultar `docs/dashboard-performance*.md` e `docs/grafana-integration.md`. |
 
@@ -264,6 +266,7 @@ Campos: **ID · prioridade · status · descrição · endpoints · arquivos env
 | testar entrega / rotacionar segredo | Mídia | `media` | Existe; bloqueado pelo proxy read-only |
 | optimize / TTL / cleanup | Banco | `database` | Existe; bloqueado pelo proxy read-only |
 | import | CGNAT | `cgnat` | Existe; bloqueado pelo proxy read-only |
+| create / edit / enable / disable / reset / revoke / delete / roles | Usuários e Acessos | `users` | Existe como `ReadOnlyAction` desde o P0-A; bloqueado pelo proxy read-only |
 
 ---
 
@@ -330,3 +333,4 @@ A V1 só pode ser desativada quando **todos** os critérios abaixo forem verdade
 | Data | Alteração |
 |---|---|
 | 2026-10-05 | Criação do documento com a auditoria funcional V1→V2, backlog canônico P0/P1/P2, itens F, V2-only, performance, fluxogramas e critério de aposentadoria da V1. |
+| 2026-10-05 | **P0-A entregue**: tela “Usuários e Acessos” na V2 (rota `users`, nav com gate `users.view`, listagem read-only de `GET /api/v1/users|roles|permissions`, filtros, paginação, 8 colunas e ações como `ReadOnlyAction`). MIG-002 → `EM_IMPLEMENTACAO`. |
