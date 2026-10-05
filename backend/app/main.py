@@ -52,6 +52,7 @@ from app.services.humanize import format_bits_per_second, format_bytes, format_f
 from app.services.clickhouse import fetch_learning_traffic_series
 from app.services.sqlite_managed import open_managed
 from app.services import media_dispatch
+from app.services import detection_dsl
 from app.services.peak_hunter import ensure_peak_analysis_db
 from app.services.peak_hunter_runner import ensure_peak_hunter_automation_db, mark_peak_hunter_scheduler_started, mark_peak_hunter_scheduler_stopped
 from app.services.peak_hunter_auto import run_peak_hunter_cycle
@@ -53799,3 +53800,14 @@ def query_dashboard_widget_api(
         query_payload,
         request,
     )
+
+
+@app.get("/api/rule-language/catalog")
+def rule_language_catalog(request: Request):
+    """Catalogo/Dicionario canonico da linguagem de regras (DSL) - somente leitura.
+
+    Fonte unica: backend/app/services/detection_dsl/catalog.py (nao duplicar no
+    frontend). Nao executa deteccao, nao toca banco e nao altera regras.
+    """
+    require_authenticated(request)
+    return detection_dsl.catalog_json()

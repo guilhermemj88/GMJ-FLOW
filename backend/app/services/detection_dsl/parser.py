@@ -21,12 +21,16 @@ from .ast import (
     with_builder_compatibility,
 )
 from .errors import (
+    CONTAINS_REQUIRES_FLAGS,
+    FORBIDDEN_CHARACTER,
     INVALID_ENUM,
+    INVALID_LIST,
     INVALID_OPERATOR,
     INVALID_SECTION,
     INVALID_UNIT,
     INVALID_VALUE,
     MISSING_VALUE,
+    REGEX_NOT_ALLOWED,
     UNBALANCED_PAREN,
     UNEXPECTED_TOKEN,
     UNKNOWN_FIELD,
@@ -49,7 +53,13 @@ HEADER_KEYWORDS = ("RULE", "DISPLAY_NAME", "ENABLED", "SEVERITY")
 
 _ALL_CAPS_RE = re.compile(r"^[A-Z][A-Z_]+$")
 _NUMBER_RE = re.compile(r"\d+(?:\.\d+)*[A-Za-z]*")
-_IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_+]*")
+_IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_+\-]*")
+# Literais de rede (IP/CIDR) que o tokenizer numerico padrao nao cobre
+# (`10.0.0.0/10`, `2001:db8::1`).
+_IPV6_RE = re.compile(r"[0-9A-Fa-f]{0,4}(?::[0-9A-Fa-f]{0,4}){2,}(?:/\d{1,3})?")
+_IPV4_RE = re.compile(r"\d{1,3}(?:\.\d{1,3}){3}(?:/\d{1,2})?")
+# Caracteres que nunca pertencem a DSL (evita SQL livre / injection).
+_FORBIDDEN_CHARS = {";": ";", "'": "'", "`": "`"}
 
 
 @dataclass(frozen=True)
@@ -87,6 +97,16 @@ def tokenize(text: str, *, start_line: int = 1) -> list[Token]:
             index += 1
             column += 1
             continue
+        if char == "[":
+            tokens.append(Token("lbracket", char, line, column))
+            index += 1
+            column += 1
+            continue
+        if char == "]":
+            tokens.append(Token("rbracket", char, line, column))
+            index += 1
+            column += 1
+            continue
         if char == ",":
             tokens.append(Token("comma", char, line, column))
             index += 1
@@ -112,6 +132,23 @@ def tokenize(text: str, *, start_line: int = 1) -> list[Token]:
             column += len(op)
             index += len(op)
             continue
+        if char in _FORBIDDEN_CHARS:
+            raise DslSyntaxError(
+                FORBIDDEN_CHARACTER,
+                f"caractere nao permitido: {char!r}",
+                line=line,
+                column=column,
+                token=char,
+                suggestion="a DSL aceita apenas expressoes de filtro (sem SQL livre)",
+            )
+        if char.isdigit() or char == ":":
+            ip_match = _IPV6_RE.match(text, index) or _IPV4_RE.match(text, index)
+            if ip_match:
+                raw = ip_match.group(0)
+                tokens.append(Token("value", raw, line, column))
+                column += len(raw)
+                index += len(raw)
+                continue
         number_match = _NUMBER_RE.match(text, index)
         if number_match:
             raw = number_match.group(0)
@@ -241,48 +278,89 @@ class _ExprParser:
         op, op_token = self.parse_operator()
         if self._is_ident("ANY"):
             self.advance()
-            if op == "=":
+            if op == catalog.OP_EQ:
                 return None  # ANY = ausencia de condicao
             raise DslSemanticError(
                 INVALID_VALUE,
-                "'any' so e aceito com '='",
+                "'any' so e aceito com '=='",
                 line=op_token.line,
                 column=op_token.column,
                 token="any",
             )
         if op not in spec.operators:
-            raise DslSemanticError(
-                INVALID_OPERATOR,
-                f"operador {op!r} nao permitido para o campo '{spec.name}' ({spec.type})",
+            raise self._operator_error(spec, op, op_token)
+        value, display = self.parse_value(spec, op)
+        return Condition(field=spec.name, op=op, value=value, display=display, line=field_token.line, column=field_token.column)
+
+    def _operator_error(self, spec: catalog.FieldSpec, op: str, op_token: Token) -> DslSemanticError:
+        if op == catalog.OP_MATCHES and spec.type != catalog.TYPE_TEXT:
+            return DslSemanticError(
+                REGEX_NOT_ALLOWED,
+                f"regex (MATCHES) so e permitido em campo textual; '{spec.name}' e do tipo {spec.type}",
                 line=op_token.line,
                 column=op_token.column,
                 token=op,
-                suggestion="operadores validos: " + ", ".join(spec.operators),
+                suggestion="use igualdade/lista no lugar de regex (ex.: sensor matches \"^FIBINET-\")",
             )
-        value, display = self.parse_value(spec, op)
-        return Condition(field=spec.name, op=op, value=value, display=display, line=field_token.line, column=field_token.column)
+        if op in (catalog.OP_CONTAINS, catalog.OP_NOT_CONTAINS) and spec.type != catalog.TYPE_FLAGS:
+            return DslSemanticError(
+                CONTAINS_REQUIRES_FLAGS,
+                f"CONTAINS/NOT CONTAINS so e permitido em campo de flags; '{spec.name}' e do tipo {spec.type}",
+                line=op_token.line,
+                column=op_token.column,
+                token=op,
+                suggestion="flags disponiveis: tcp_flags (ex.: tcp_flags contains syn)",
+            )
+        return DslSemanticError(
+            INVALID_OPERATOR,
+            f"operador {op!r} nao permitido para o campo '{spec.name}' ({spec.type})",
+            line=op_token.line,
+            column=op_token.column,
+            token=op,
+            suggestion="operadores validos: " + ", ".join(spec.operators),
+        )
 
     def parse_operator(self) -> tuple[str, Token]:
         token = self.peek()
         if token.kind == "op":
             self.advance()
-            return token.value, token
+            canonical = catalog.canonical_operator(token.value)
+            if canonical is None:
+                raise DslSyntaxError(
+                    UNEXPECTED_TOKEN,
+                    f"operador desconhecido: {token.value!r}",
+                    line=token.line,
+                    column=token.column,
+                    token=token.value,
+                )
+            return canonical, token
         if token.kind == "ident":
             upper = token.value.upper()
-            if upper == "IN":
+            if upper in ("IN", "BETWEEN", "CONTAINS", "MATCHES"):
                 self.advance()
-                return "IN", token
+                return upper, token
             if upper == "NOT":
                 self.advance()
-                if not self._is_ident("IN"):
-                    raise DslSyntaxError(
-                        UNEXPECTED_TOKEN, "esperado IN depois de NOT", line=token.line, column=token.column
-                    )
-                self.advance()
-                return "NOT IN", token
-            if upper == "BETWEEN":
-                self.advance()
-                return "BETWEEN", token
+                if self._is_ident("IN"):
+                    self.advance()
+                    return catalog.OP_NOT_IN, token
+                if self._is_ident("CONTAINS"):
+                    self.advance()
+                    return catalog.OP_NOT_CONTAINS, token
+                raise DslSyntaxError(
+                    UNEXPECTED_TOKEN,
+                    "esperado IN ou CONTAINS depois de NOT",
+                    line=token.line,
+                    column=token.column,
+                    token=token.value,
+                )
+            raise DslSyntaxError(
+                UNEXPECTED_TOKEN,
+                f"operador desconhecido: {token.value!r}",
+                line=token.line,
+                column=token.column,
+                token=token.value,
+            )
         raise DslSyntaxError(
             UNEXPECTED_TOKEN,
             f"esperado operador, encontrado {token.value!r}",
@@ -292,7 +370,7 @@ class _ExprParser:
         )
 
     def parse_value(self, spec: catalog.FieldSpec, op: str):
-        if op == "BETWEEN":
+        if op == catalog.OP_BETWEEN:
             low, _ = self.parse_single_value(spec)
             if not self._is_ident("AND"):
                 token = self.peek()
@@ -302,13 +380,22 @@ class _ExprParser:
             self.advance()
             high, _ = self.parse_single_value(spec)
             return (low, high), None
-        if op in ("IN", "NOT IN"):
+        if op in (catalog.OP_IN, catalog.OP_NOT_IN):
             opening = self.peek()
-            if opening.kind != "lparen":
-                raise DslSyntaxError(
-                    UNEXPECTED_TOKEN, "lista exige '(' apos IN", line=opening.line, column=opening.column
-                )
+            if opening.kind not in ("lparen", "lbracket"):
+                # `src_ip in 100.64.0.0/10` e valido (lista de 1 item).
+                value, display = self.parse_single_value(spec)
+                return (value,), display
+            closing_kind = "rparen" if opening.kind == "lparen" else "rbracket"
+            closer = ")" if opening.kind == "lparen" else "]"
             self.advance()
+            if self.peek().kind == closing_kind:
+                raise DslSemanticError(
+                    INVALID_LIST,
+                    f"lista vazia em '{spec.name}': informe ao menos um valor",
+                    line=opening.line,
+                    column=opening.column,
+                )
             values = []
             displays = []
             while True:
@@ -319,14 +406,21 @@ class _ExprParser:
                 if token.kind == "comma":
                     self.advance()
                     continue
-                if token.kind == "rparen":
+                if token.kind == closing_kind:
                     self.advance()
                     break
                 raise DslSyntaxError(
                     UNEXPECTED_TOKEN,
-                    f"esperado ',' ou ')' na lista, encontrado {token.value!r}",
+                    f"esperado ',' ou '{closer}' na lista, encontrado {token.value!r}",
                     line=token.line,
                     column=token.column,
+                )
+            if not values:
+                raise DslSemanticError(
+                    INVALID_LIST,
+                    f"lista vazia em '{spec.name}': informe ao menos um valor",
+                    line=opening.line,
+                    column=opening.column,
                 )
             display = ", ".join(str(item) for item in displays if item)
             return tuple(values), (display or None)
@@ -335,7 +429,7 @@ class _ExprParser:
 
     def parse_single_value(self, spec: catalog.FieldSpec):
         token = self.peek()
-        if token.kind == "eof" or token.kind in ("comma", "rparen"):
+        if token.kind == "eof" or token.kind in ("comma", "rparen", "rbracket"):
             raise DslSyntaxError(
                 MISSING_VALUE, "valor ausente", line=token.line, column=token.column, token=token.value
             )
@@ -380,7 +474,7 @@ class _ExprParser:
                 )
             self._reject_spaced_unit(spec, token)
             return int(token.value), token.value
-        if token.kind not in ("ident", "string"):
+        if token.kind not in ("ident", "string", "value"):
             raise DslSemanticError(
                 INVALID_VALUE,
                 f"valor de '{spec.name}' deve ser texto",
@@ -427,10 +521,14 @@ class _ExprParser:
         if spec.type == catalog.TYPE_IP:
             try:
                 return str(ipaddress.ip_address(raw)), raw
-            except ValueError as exc:
-                raise DslSemanticError(
-                    INVALID_VALUE, f"IP invalido: '{raw}'", line=token.line, column=token.column, token=raw
-                ) from exc
+            except ValueError:
+                # `src_ip in 100.64.0.0/10` e valido: IP aceita rede em IN/NOT IN.
+                try:
+                    return str(ipaddress.ip_network(raw, strict=False)), raw
+                except ValueError as exc:
+                    raise DslSemanticError(
+                        INVALID_VALUE, f"IP invalido: '{raw}'", line=token.line, column=token.column, token=raw
+                    ) from exc
         if spec.type == catalog.TYPE_CIDR:
             try:
                 return str(ipaddress.ip_network(raw, strict=False)), raw
@@ -440,6 +538,8 @@ class _ExprParser:
                 ) from exc
         if spec.type == catalog.TYPE_FLAGS:
             return raw.strip().lower(), raw
+        if spec.type == catalog.TYPE_TEXT:
+            return raw, raw
         return raw, raw
 
 
@@ -496,6 +596,17 @@ def _parse_boolean(lines: list[tuple[int, str]]):
     block = "\n".join(item[1] for item in lines)
     tokens = tokenize(block, start_line=start_line)
     return _ExprParser(tokens).parse()
+
+
+def parse_expression(text: str, *, start_line: int = 1):
+    """Expressao booleana pura (sem secoes) -> BooleanNode.
+
+    Base reutilizavel para Flow Search (fase 2), que filtra apenas atributos de
+    flow e portanto nao tem secoes WARNING/CRITICAL/EVIDENCE.
+    """
+    if not isinstance(text, str):
+        raise DslSyntaxError(UNEXPECTED_TOKEN, "entrada deve ser texto")
+    return _ExprParser(tokenize(text, start_line=start_line)).parse()
 
 
 def _parse_evidence(lines) -> tuple[EvidenceItem, ...]:

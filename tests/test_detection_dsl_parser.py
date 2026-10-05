@@ -52,7 +52,7 @@ class DirectionAliasTest(unittest.TestCase):
     def test_serializer_never_writes_legacy_direction(self):
         ast = parse("MATCH\ndirection = transmits\n")
         text = serialize(ast)
-        self.assertIn("direction = outbound", text)
+        self.assertIn("direction == outbound", text)
         self.assertNotIn("transmits", text)
         self.assertNotIn("receives", text)
 

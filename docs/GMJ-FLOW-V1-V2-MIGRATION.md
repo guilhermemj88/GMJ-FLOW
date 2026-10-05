@@ -79,7 +79,7 @@ Este é o documento **canônico** para qualquer IA/agente responder:
 | Dashboards custom / Grafana | [docs/dashboard-prefixes-grafana-phase1.md](dashboard-prefixes-grafana-phase1.md), [docs/grafana-integration.md](grafana-integration.md) |
 | Flows / períodos | [docs/time-ranges.md](time-ranges.md), [docs/hot-cache.md](hot-cache.md) |
 | Sensores / Interfaces / coleta | [docs/collectors.md](collectors.md), [docs/pmacct.md](pmacct.md), [docs/snmp-calibration.md](snmp-calibration.md) |
-| Anomalias / Vetores | [docs/anomalies.md](anomalies.md) |
+| Anomalias / Vetores / linguagem de regras (DSL) | [docs/anomalies.md](anomalies.md), [docs/detection-rule-language.md](detection-rule-language.md) |
 | Threat Intelligence / mapa | [docs/threat-intelligence.md](threat-intelligence.md), [docs/geoip-offline.md](geoip-offline.md) |
 | Eventos de segurança / investigação | [docs/security-events.md](security-events.md), [docs/security-event-investigation.md](security-event-investigation.md) |
 | Mitigação / BGP / RTBH | [docs/mitigation-playbook.md](mitigation-playbook.md), [docs/ai-mitigation.md](ai-mitigation.md) |
@@ -269,6 +269,7 @@ Campos: **ID · prioridade · status · descrição · endpoints · arquivos env
 | MIG-020 | P2 | TODO | Configurações operacionais | `/api/detection/run-now`, `/api/collectors/apply`, `/api/config/effective` | V2, `backend/app/main.py` | smoke + permissão | — | 2026-10-05 | Escritas → F no preview. |
 | MIG-021 | P2 | AUDITANDO | Performance de endpoints lentos | `/api/dashboard/directional-analytics`, `/api/geo/flows`, `/api/mitigation/executions`, `/api/system/containers` | `backend/app/main.py`, `backend/app/services/dashboard_*`, `docs/dashboard-performance*.md` | tempo/tamanho de resposta | — | 2026-10-05 | Sintomas medidos; ver seção 7. |
 | MIG-022 | P2 | TODO | CGNAT `errors.csv` e complementos | `/api/cgnat/imports/{id}/errors.csv`, `/api/geo/anomalies` | V2, `backend/app/services/cgnat_mapping.py` | export + mapa | — | 2026-10-05 | — |
+| MIG-030 | P2 | EM_IMPLEMENTACAO | **DSL de flows** — Fase 1: catálogo/dicionário canônico + base do Flow Search | `GET /api/rule-language/catalog` | `backend/app/services/detection_dsl/*`, `backend/app/main.py` (rota), `docs/detection-rule-language.md` | 94 testes de DSL (parser/validator/catálogo/endpoint) | `feat(dsl): consolidate rule language catalog and dictionary (fase 1)` | 2026-10-05 | Fase 2 = Flow Search por expressão (`parse_expression`/`validate_expression`). Detector atual **não** alterado; sem migration; sem AST persistida. |
 
 ### Itens F (não são migração; não entram no backlog)
 
@@ -352,3 +353,4 @@ A V1 só pode ser desativada quando **todos** os critérios abaixo forem verdade
 | 2026-10-05 | Criação do documento com a auditoria funcional V1→V2, backlog canônico P0/P1/P2, itens F, V2-only, performance, fluxogramas e critério de aposentadoria da V1. |
 | 2026-10-05 | **P0-A entregue**: tela “Usuários e Acessos” na V2 (rota `users`, nav com gate `users.view`, listagem read-only de `GET /api/v1/users|roles|permissions`, filtros, paginação, 8 colunas e ações como `ReadOnlyAction`). MIG-002 → `EM_IMPLEMENTACAO`. |
 | 2026-10-05 | **Versionamento do source da V2 (Opção A)**: criado `preview-v2/` no repo canônico (src, `index.html`, `package.json`/lock, `vite.config.js`, `deploy/`, `docs/V2-MIGRATION-MATRIX.md`, `README.md`, `.gitignore`). O build do source versionado reproduz o bundle publicado `assets/index-Cy72qZUb.js` (md5 `9b34b2d4…`). Nenhuma publicação/deploy. |
+| 2026-10-05 | **DSL de flows — Fase 1**: evoluído o catálogo/dicionário canônico (`backend/app/services/detection_dsl/catalog.py`) com operadores canônicos (`==`), aliases (`proto`, `receives/transmits/sends`), campos prioritários e métricas/evidence; adicionado `parse_expression`/`validate_expression` (base do Flow Search) e o endpoint read-only `GET /api/rule-language/catalog`; criado `docs/detection-rule-language.md`. Detector atual **não** alterado, sem migration, sem AST persistida. MIG-030. |

@@ -50,7 +50,7 @@ class GoldenDnsRuleTest(unittest.TestCase):
         self.assertEqual(int(critical["packets_s"].value), 200_000)
         self.assertEqual(int(critical["bits_s"].value), 2_000_000_000)
 
-        self.assertEqual([item.field for item in ast.evidence], ["unique_src", "avg_packet_bytes", "flows_s"])
+        self.assertEqual([item.field for item in ast.evidence], ["unique_src_ips", "avg_packet_bytes", "flows_s"])
         self.assertEqual(ast.window.seconds, 60)
         self.assertEqual(ast.execution.consecutive, 1)
         self.assertEqual(ast.scope.group_by.preset, "target_port")
@@ -73,7 +73,7 @@ class GoldenDnsRuleTest(unittest.TestCase):
         text = serialize(parse(GOLDEN_DNS_RULE))
         self.assertNotIn("receives", text)
         self.assertNotIn("= any", text)
-        self.assertIn("direction = inbound", text)
+        self.assertIn("direction == inbound", text)
         self.assertIn("pps >= 100k", text)
         self.assertIn("bps >= 1G", text)
 
@@ -90,8 +90,8 @@ class GoldenNtpRuleTest(unittest.TestCase):
         first = parse(GOLDEN_NTP_RULE)
         second = parse(serialize(first))
         self.assertTrue(semantic_equal(first, second))
-        self.assertIn("decoder = NTP", serialize(second))
-        self.assertIn("src_port = 123", serialize(second))
+        self.assertIn("decoder == NTP", serialize(second))
+        self.assertIn("src_port == 123", serialize(second))
 
 
 class GroupByRoundtripTest(unittest.TestCase):

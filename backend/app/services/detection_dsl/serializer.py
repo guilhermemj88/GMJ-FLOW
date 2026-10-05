@@ -1,11 +1,14 @@
 """AST v1 -> texto canonico da DSL (deterministico)."""
 from __future__ import annotations
 
+import re
+
 from . import catalog
 from .ast import BooleanGroup, Condition, NotNode, RuleAst
 from .units import format_quantity
 
 _PREC = {"or": 1, "and": 2, "not": 3, "cond": 4}
+_SAFE_TEXT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_+\-]*$")
 
 
 def _field_text(name: str) -> str:
@@ -20,6 +23,11 @@ def _format_value(spec: catalog.FieldSpec | None, value, display: str | None = N
         if display:
             return display
         return format_quantity(value)
+    if spec is not None and spec.type == catalog.TYPE_TEXT:
+        text = str(value)
+        if not _SAFE_TEXT_RE.match(text):
+            return '"' + text.replace('"', "") + '"'
+        return text
     if display and spec is None:
         return display
     if isinstance(value, bool):
@@ -30,13 +38,13 @@ def _format_value(spec: catalog.FieldSpec | None, value, display: str | None = N
 def _condition_text(condition: Condition) -> str:
     spec = catalog.FIELDS.get(condition.field)
     field = _field_text(condition.field)
-    if condition.op == "BETWEEN":
+    if condition.op == catalog.OP_BETWEEN:
         low, high = condition.value if isinstance(condition.value, tuple) else (condition.value, None)
         return f"{field} BETWEEN {_format_value(spec, low)} AND {_format_value(spec, high)}"
-    if condition.op in ("IN", "NOT IN"):
+    if condition.op in (catalog.OP_IN, catalog.OP_NOT_IN):
         values = condition.value if isinstance(condition.value, tuple) else (condition.value,)
         rendered = ", ".join(_format_value(spec, item) for item in values)
-        return f"{field} {condition.op} ({rendered})"
+        return f"{field} {condition.op} [{rendered}]"
     return f"{field} {condition.op} {_format_value(spec, condition.value, condition.display)}"
 
 

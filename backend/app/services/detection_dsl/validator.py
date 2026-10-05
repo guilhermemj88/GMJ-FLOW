@@ -2,20 +2,24 @@
 from __future__ import annotations
 
 import ipaddress
+import re
 
 from . import catalog
 from .ast import BooleanGroup, Condition, NotNode, RuleAst, is_builder_compatible, iter_conditions
 from .errors import (
     CAPABILITY_EXPERIMENTAL,
     CAPABILITY_UNAVAILABLE,
+    CONTAINS_REQUIRES_FLAGS,
     FIELD_NOT_ALLOWED_IN_SECTION,
     INVALID_ENUM,
     INVALID_GROUP_BY_FIELD,
+    INVALID_LIST,
     INVALID_OPERATOR,
     INVALID_RANGE,
     INVALID_RESPONSE_MODE,
     INVALID_VALUE,
     OUT_OF_RANGE,
+    REGEX_NOT_ALLOWED,
     UNKNOWN_CAPABILITY,
     UNKNOWN_DEDUPE_PROFILE,
     UNKNOWN_FIELD,
@@ -33,9 +37,9 @@ _SECTION_OF_NODE = {
 
 
 def _condition_values(condition: Condition):
-    if condition.op == "BETWEEN":
+    if condition.op == catalog.OP_BETWEEN:
         return tuple(condition.value) if isinstance(condition.value, tuple) else (condition.value,)
-    if condition.op in ("IN", "NOT IN"):
+    if condition.op in (catalog.OP_IN, catalog.OP_NOT_IN):
         return tuple(condition.value) if isinstance(condition.value, tuple) else (condition.value,)
     return (condition.value,)
 
@@ -63,15 +67,23 @@ def _check_condition(result: ValidationResult, condition: Condition, section: st
         return
     if condition.op not in spec.operators:
         result.add_error(
-            INVALID_OPERATOR,
-            f"operador {condition.op!r} nao permitido para '{spec.name}'",
+            _operator_error_code(spec, condition.op),
+            _operator_error_message(spec, condition.op),
             line=condition.line,
             column=condition.column,
             token=condition.op,
             suggestion="operadores validos: " + ", ".join(spec.operators),
         )
     values = _condition_values(condition)
-    if condition.op == "BETWEEN" and len(values) == 2:
+    if condition.op in (catalog.OP_IN, catalog.OP_NOT_IN) and not values:
+        result.add_error(
+            INVALID_LIST,
+            f"lista vazia em '{spec.name}': informe ao menos um valor",
+            line=condition.line,
+            column=condition.column,
+            token=spec.name,
+        )
+    if condition.op == catalog.OP_BETWEEN and len(values) == 2:
         try:
             if values[0] > values[1]:
                 result.add_error(
@@ -108,12 +120,47 @@ def _check_condition(result: ValidationResult, condition: Condition, section: st
         elif spec.type in (catalog.TYPE_IP, catalog.TYPE_CIDR):
             try:
                 if spec.type == catalog.TYPE_IP:
-                    ipaddress.ip_address(str(value))
+                    try:
+                        ipaddress.ip_address(str(value))
+                    except ValueError:
+                        ipaddress.ip_network(str(value), strict=False)
                 else:
                     ipaddress.ip_network(str(value), strict=False)
             except ValueError:
                 result.add_error(INVALID_VALUE, f"valor de rede invalido em '{spec.name}': {value}", token=str(value))
+        elif spec.type == catalog.TYPE_TEXT:
+            if condition.op == catalog.OP_MATCHES:
+                try:
+                    re.compile(str(value))
+                except re.error as exc:
+                    result.add_error(
+                        INVALID_VALUE,
+                        f"regex invalida em '{spec.name}': {exc}",
+                        line=condition.line,
+                        column=condition.column,
+                        token=str(value),
+                        suggestion="revise a expressao regular (sem delimitadores /.../)",
+                    )
+        elif spec.type == catalog.TYPE_FLAGS:
+            if not str(value).strip():
+                result.add_error(INVALID_VALUE, f"flag vazia em '{spec.name}'", token=str(value))
     _check_capability(result, spec, condition)
+
+
+def _operator_error_code(spec: catalog.FieldSpec, op: str) -> str:
+    if op == catalog.OP_MATCHES and spec.type != catalog.TYPE_TEXT:
+        return REGEX_NOT_ALLOWED
+    if op in (catalog.OP_CONTAINS, catalog.OP_NOT_CONTAINS) and spec.type != catalog.TYPE_FLAGS:
+        return CONTAINS_REQUIRES_FLAGS
+    return INVALID_OPERATOR
+
+
+def _operator_error_message(spec: catalog.FieldSpec, op: str) -> str:
+    if op == catalog.OP_MATCHES and spec.type != catalog.TYPE_TEXT:
+        return f"regex (MATCHES) so e permitido em campo textual; '{spec.name}' e do tipo {spec.type}"
+    if op in (catalog.OP_CONTAINS, catalog.OP_NOT_CONTAINS) and spec.type != catalog.TYPE_FLAGS:
+        return f"CONTAINS/NOT CONTAINS so e permitido em campo de flags; '{spec.name}' e do tipo {spec.type}"
+    return f"operador {op!r} nao permitido para '{spec.name}'"
 
 
 def _check_capability(result: ValidationResult, spec: catalog.FieldSpec, condition: Condition) -> None:
@@ -254,6 +301,23 @@ def validate_text(text: str) -> ValidationResult:
     from .parser import parse
 
     return validate(parse(text))
+
+
+def validate_node(node, section: str = catalog.SECTION_MATCH) -> ValidationResult:
+    """Valida um BooleanNode isolado dentro de uma secao (base do Flow Search)."""
+    result = ValidationResult()
+    _walk(result, node, section)
+    return result
+
+
+def validate_expression(text: str, section: str = catalog.SECTION_MATCH) -> ValidationResult:
+    """Expressao pura (sem secoes) -> ValidationResult.
+
+    Reutilizavel pelo Flow Search: a expressao e sempre da secao MATCH.
+    """
+    from .parser import parse_expression
+
+    return validate_node(parse_expression(text), section)
 
 
 def validate_or_raise(ast: RuleAst) -> None:

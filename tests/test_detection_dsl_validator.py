@@ -115,7 +115,7 @@ class SemanticValidationTest(unittest.TestCase):
 
 class CapabilityValidationTest(unittest.TestCase):
     def test_tcp_flags_experimental_warning(self):
-        ast, result = parse_and_validate("MATCH\ntcp_flags = syn\n")
+        ast, result = parse_and_validate("MATCH\ntcp_flags contains syn\n")
         self.assertTrue(result.ok, result.as_dict())
         self.assertIn("CAPABILITY_EXPERIMENTAL", _warning_codes(result))
 

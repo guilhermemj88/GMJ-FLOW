@@ -185,3 +185,14 @@ Regra para SYN flood recebido acima de 1 Mpps:
 - Valor: `1000000`
 - Unidade: `packets_s`
 - Severidade: `warning`
+
+## Linguagem de regras (DSL)
+
+O vocabulario canonico para descrever regras/consultas de flows (MATCH, TRIGGER, EVIDENCE,
+GROUP BY), com aliases, unidades, validacao estruturada e o dicionario exposto em
+`GET /api/rule-language/catalog`, esta documentado em
+[docs/detection-rule-language.md](detection-rule-language.md).
+
+O pacote `backend/app/services/detection_dsl/` (Fase 1) e a base reutilizavel para o Flow
+Search por expressao (Fase 2). Nesta fase o detector atual nao foi alterado e nenhuma regra
+foi migrada.
