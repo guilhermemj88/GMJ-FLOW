@@ -1,0 +1,21 @@
+# Dependencias e artefatos de build (nunca versionar)
+node_modules/
+dist/
+
+# Artefatos operacionais / diagnostico
+.diag/
+baseline.txt
+*.log
+*.png
+
+# Backups e arquivos temporarios locais
+*.bak
+*.bak.*
+
+# Ambiente (secrets nunca entram no Git)
+.env
+.env.*
+
+# Caches
+.vite/
+coverage/

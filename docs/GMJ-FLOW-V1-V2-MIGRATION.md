@@ -22,6 +22,23 @@ Este é o documento **canônico** para qualquer IA/agente responder:
 | **V2 (preview)** | http://172.20.10.40:8081/ | `/home/guilherme/GMJ-FLOW-preview/dist` | build Vite (`index-DZRB5VDm.js`, `index-_i9-m-G3.css`), nginx **read-only** |
 | Backend | (mesmo para as duas) | `gmj-flow-backend:8000` | V1 e V2 fazem proxy para o mesmo backend |
 
+### 1.1 Source canônico da V2 (versionado)
+
+- **Source:** `preview-v2/` **neste repositório** (antes vivia solto em `C:\projetos\GMJ-FLOW-MagicPreview`, sem Git).
+- **Build:** `cd preview-v2 && npm ci && npm run build` (Vite). Gera `preview-v2/dist/`, que **não é versionado** (`.gitignore`).
+- **Runtime atual:** `/home/guilherme/GMJ-FLOW-preview/dist` — bind mount do nginx `gmj-flow-preview` em `http://172.20.10.40:8081/` (preview **somente leitura**).
+- **Publicação atual:** cópia **manual** do artefato `dist` para o diretório de runtime (não há CI). **Sempre gerar backup do `dist` atual antes de publicar** — o serviço aponta para o backend real.
+- **Referência técnica detalhada:** `preview-v2/docs/V2-MIGRATION-MATRIX.md`.
+
+**Divisão de papéis (evitar fontes concorrentes):**
+
+| Documento | Papel |
+|---|---|
+| `docs/GMJ-FLOW-V1-V2-MIGRATION.md` (este) | **backlog/status canônico** da migração V1 → V2 |
+| `preview-v2/docs/V2-MIGRATION-MATRIX.md` | **documentação técnica/detalhada da V2** (telas, endpoints, decisões) |
+
+**Base validada:** o build do source versionado reproduz o bundle publicado `assets/index-Cy72qZUb.js` (md5 `9b34b2d4773c097469e8110909fe3468`), o mesmo que o `:8081` serve.
+
 **Método:** leitura do código-fonte real no servidor (V1 `index.html`, bundle da V2, `GMJ-FLOW-preview/nginx.conf`, `backend/app/main.py`), `GET`s autenticados reais nas duas portas e `docker inspect`/`git` somente leitura. **Nenhuma escrita**, nenhum deploy, nenhum restart, nenhum toque em banco/PMACCT.
 
 > **Sessões Edge/CDP do operador** (`127.0.0.1:9222`/`9223`) são loopback da máquina do operador e **não são acessíveis** do servidor. A auditoria foi feita sobre o artefato realmente servido no IP real; não se usou `127.0.0.1:8081`.
@@ -334,3 +351,4 @@ A V1 só pode ser desativada quando **todos** os critérios abaixo forem verdade
 |---|---|
 | 2026-10-05 | Criação do documento com a auditoria funcional V1→V2, backlog canônico P0/P1/P2, itens F, V2-only, performance, fluxogramas e critério de aposentadoria da V1. |
 | 2026-10-05 | **P0-A entregue**: tela “Usuários e Acessos” na V2 (rota `users`, nav com gate `users.view`, listagem read-only de `GET /api/v1/users|roles|permissions`, filtros, paginação, 8 colunas e ações como `ReadOnlyAction`). MIG-002 → `EM_IMPLEMENTACAO`. |
+| 2026-10-05 | **Versionamento do source da V2 (Opção A)**: criado `preview-v2/` no repo canônico (src, `index.html`, `package.json`/lock, `vite.config.js`, `deploy/`, `docs/V2-MIGRATION-MATRIX.md`, `README.md`, `.gitignore`). O build do source versionado reproduz o bundle publicado `assets/index-Cy72qZUb.js` (md5 `9b34b2d4…`). Nenhuma publicação/deploy. |
