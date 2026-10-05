@@ -50217,6 +50217,65 @@ def dashboard_cache_set(key: str, payload: dict[str, Any]) -> dict[str, Any]:
     return dict(stored)
 
 
+_FLOW_SEARCH_SCHEMA_CACHE: dict[str, Any] = {"schema": None, "at": 0.0}
+
+
+def flow_search_flow_raw_schema() -> dict[str, str]:
+    """Schema de flow_raw com cache curto (evita DESCRIBE a cada validacao)."""
+    now = time.monotonic()
+    cached_schema = _FLOW_SEARCH_SCHEMA_CACHE.get("schema")
+    cached_at = float(_FLOW_SEARCH_SCHEMA_CACHE.get("at") or 0.0)
+    if cached_schema and now - cached_at < 300:
+        return cached_schema
+    schema = clickhouse_flow_raw_schema()
+    if schema:
+        _FLOW_SEARCH_SCHEMA_CACHE["schema"] = schema
+        _FLOW_SEARCH_SCHEMA_CACHE["at"] = now
+    return schema
+
+
+def flow_search_internal_networks() -> tuple[str, ...]:
+    """Redes internas usadas por `direction == inbound/outbound` (configuravel).
+
+    Default do catalogo da DSL (RFC1918 + loopback + link-local + CGNAT + ULA).
+    Sobrescrevivel por GMJFLOW_FLOW_INTERNAL_CIDRS (lista separada por virgula).
+    """
+    raw = os.getenv("GMJFLOW_FLOW_INTERNAL_CIDRS", "")
+    networks = tuple(token.strip() for token in raw.split(",") if token.strip())
+    return networks or detection_dsl.DEFAULT_INTERNAL_NETWORKS
+
+
+def flow_search_dialect() -> detection_dsl.FlowSearchDialect:
+    """Ponte entre o dicionario da DSL e o schema fisico do flow_raw."""
+    return detection_dsl.FlowSearchDialect(
+        column_types=flow_search_flow_raw_schema(),
+        ip_param=lambda value: clickhouse_ip_string_param(value, "expression"),
+        cidr_param=lambda value: clickhouse_cidr_string_param(value, "expression"),
+        decoder_condition=decoder_clickhouse_condition,
+        internal_networks=flow_search_internal_networks(),
+    )
+
+
+def flow_search_expression_http_error(exc: Any) -> HTTPException:
+    detail: dict[str, Any] = {
+        "code": str(getattr(exc, "code", "INVALID_EXPRESSION")),
+        "message": str(getattr(exc, "message", exc)),
+    }
+    if hasattr(exc, "as_dict"):
+        detail["errors"] = [exc.as_dict()]
+    return HTTPException(status_code=400, detail=detail)
+
+
+def compile_flow_search_expression(expression: str) -> detection_dsl.CompiledMatch:
+    """Texto -> AST -> validator(MATCH) -> WHERE do ClickHouse (parametros vinculados)."""
+    try:
+        return detection_dsl.compile_expression(clean_text(expression), flow_search_dialect())
+    except detection_dsl.CompileError as exc:
+        raise flow_search_expression_http_error(exc) from exc
+    except detection_dsl.RuleDslError as exc:
+        raise flow_search_expression_http_error(exc) from exc
+
+
 def search_flows_payload(
     range_minutes: int,
     start: datetime | None,
@@ -50239,6 +50298,7 @@ def search_flows_payload(
     limit: int,
     order_by: str,
     order_dir: str,
+    expression: str | None = None,
 ) -> dict[str, Any]:
     ensure_clickhouse_schema()
     context = flow_query_context(
@@ -50262,6 +50322,16 @@ def search_flows_payload(
         decoder,
         "both",
     )
+    if expression is not None and clean_text(expression):
+        compiled = compile_flow_search_expression(expression)
+        context["params"].update(compiled.params)
+        expression_where = f"({compiled.where})"
+        context["where"] = (
+            f'{context["where"]} AND {expression_where}' if context["where"] else expression_where
+        )
+        context["rated_where"] = dashboard_rated_source_where(context["where"])
+        context["expression"] = clean_text(expression)
+        context["expression_canonical"] = compiled.canonical_expression
     start_dt = context["start"]
     end_dt = context["end"]
     params = dict(context["params"])
@@ -50383,6 +50453,8 @@ def search_flows_payload(
         "sensor": sensor,
         "order_by": order_by,
         "order_dir": direction_sql.lower(),
+        "expression": context.get("expression"),
+        "expression_canonical": context.get("expression_canonical"),
         "items": items,
     }
 
@@ -50679,6 +50751,7 @@ def search_flows(
     limit: int = Query(200, ge=1, le=5000),
     order_by: str = "flow_time",
     order_dir: str = "desc",
+    expression: str | None = None,
     format: str | None = None,
 ):
     payload = search_flows_payload(
@@ -50703,12 +50776,33 @@ def search_flows(
         limit,
         order_by,
         order_dir,
+        expression,
     )
     if clean_text(format).lower() == "csv":
         return flows_csv_response(payload)
     if clean_text(format).lower() == "pdf":
         return flows_pdf_response(payload)
     return payload
+
+
+@app.get("/api/flows/expression/validate")
+def validate_flow_search_expression(expression: str = Query("")):
+    """Valida/preview de expressao do Flow Search (somente leitura).
+
+    NAO executa query: devolve validade, expressao canonica, AST resumida,
+    campos usados, erros e avisos estruturados.
+    """
+    try:
+        return detection_dsl.check_expression(expression, flow_search_dialect())
+    except Exception as exc:  # pragma: no cover - defensivo; validacao nunca deve dar 5xx
+        logger.warning("Falha ao validar expressao do Flow Search: %s", exc)
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "EXPRESSION_VALIDATION_FAILED",
+                "message": "nao foi possivel validar a expressao",
+            },
+        ) from exc
 
 
 def top_flow_items_from_rows(

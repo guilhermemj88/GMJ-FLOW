@@ -20,6 +20,20 @@ O Flow Search aceita filtros independentes:
 
 O parametro legado `ip` continua funcionando no backend e consulta `src_ip = ip OR dst_ip = ip`. Enderecos IPv4 sao convertidos para IPv4-mapped IPv6, como `::ffff:192.168.0.171`, para comparar com as colunas IPv6 do ClickHouse.
 
+## Busca por expressao (DSL)
+
+Alem dos filtros por coluna, o Flow Search aceita `expression=<DSL>` (apenas a secao MATCH):
+
+```http
+GET /api/flows/search?range_minutes=60&expression=proto%20==%20udp%20and%20src_port%20==%2053
+```
+
+`expression` e filtros legados podem ser combinados; a combinacao e **AND**. Sem `expression`, o comportamento antigo permanece igual. Para validar/preview sem executar query use `GET /api/flows/expression/validate?expression=...`, que devolve `valid`, `canonical_expression`, AST resumida, campos e erros estruturados.
+
+Limites de protecao: 2000 caracteres por expressao, 40 condicoes, profundidade 12, 64 itens por lista `IN`/`NOT IN` e 200 caracteres de regex. `direction == inbound/outbound` filtra pelo IP interno no destino/origem usando a lista de redes internas (default RFC1918 + loopback + link-local + CGNAT + ULA, sobrescrevivel por `GMJFLOW_FLOW_INTERNAL_CIDRS`).
+
+A semantica completa (campos, operadores, exemplos e comparacao legacy x expressao) esta em `docs/detection-rule-language.md`.
+
 A aba **Flows** tem duas sub-abas:
 
 - **Registros de Flow**: tabela de registros com ordenacao no backend e exportacao CSV por `format=csv`.

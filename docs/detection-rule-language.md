@@ -1,6 +1,6 @@
 # GMJ-FLOW — Linguagem de Regras (DSL) e Flow Search
 
-> **Status:** fundação entregue na Fase 1 (catálogo/dicionário) · **Criado:** 2026-10-05
+> **Status:** Fases 1 e 2 entregues (catálogo/dicionário + Flow Search por expressão) · **Criado:** 2026-10-05
 > **Fonte de verdade do código:** `backend/app/services/detection_dsl/` (pacote puro, apenas stdlib).
 > **Fonte de verdade do dicionário:** `backend/app/services/detection_dsl/catalog.py`.
 > **Endpoint de leitura:** `GET /api/rule-language/catalog`.
@@ -9,10 +9,11 @@ Este documento é **canônico** para a linguagem de regras do GMJ-FLOW. Qualquer
 que for evoluir a DSL, o Flow Search por expressão ou os Vetores de Ataque deve ler este
 documento **antes** de alterar código.
 
-Nesta fase **nada é executado em produção**: não há migration, não há AST persistida, não
-há alteração de `attack_vectors`/`detection_template_rules` e o detector atual permanece
-intocado. O objetivo é consolidar o vocabulário e preparar a base reutilizável para a
-Fase 2 (Flow Search por expressão).
+Nas **Fases 1 e 2** não há migration, não há AST persistida, não há alteração de
+`attack_vectors`/`detection_template_rules` e o detector atual permanece intocado. A Fase 1
+consolidou o vocabulário/dicionário; a **Fase 2** liga a DSL ao **Flow Search** por
+expressão (`GET /api/flows/search?expression=...`, somente leitura) através de um
+compilador seguro.
 
 ---
 
@@ -277,7 +278,112 @@ O serializer é determinístico: `parse(serialize(ast))` é semanticamente igual
 
 ---
 
-## 10. Segurança
+## 10. Flow Search por expressão
+
+O `GET /api/flows/search` continua aceitando **todos** os filtros por coluna. De forma
+aditiva, aceita `expression=<DSL>` (apenas a seção **MATCH**):
+
+```http
+GET /api/flows/search?range_minutes=60&expression=proto%20==%20udp%20and%20src_port%20==%2053
+```
+
+- Se `expression` não for informado, o comportamento antigo é **100% preservado**.
+- `expression` + filtros legados são combinados com **AND**:
+  `(expression) AND (filtros legados)`. A resposta devolve `expression` e
+  `expression_canonical` para não haver ambiguidade silenciosa.
+- Nenhuma nova agregação: o resultado continua sendo **linhas reais de `flow_raw`** com as
+  colunas atuais.
+- Nesta fase **não** são aceitos no Flow Search: `pps`, `bps`, `flows`, `unique_*`,
+  `TRIGGER`, `GROUP BY` e `EVIDENCE` (pertencem ao modelo agregado/detector).
+
+### 10.1 Validação/preview (somente leitura, sem executar query)
+
+```http
+GET /api/flows/expression/validate?expression=sensor%20matches%20%22%5EFIBINET-%22
+```
+
+Resposta: `valid`, `canonical_expression`, `ast` (resumida), `conditions`, `fields`,
+`errors` e `warnings` estruturados. É `GET` de propósito — o preview `:8081` bloqueia
+`POST` genérico.
+
+### 10.2 Como a expressão vira SQL
+
+```text
+texto -> parse_expression() -> AST -> validate_expression(section=MATCH) -> compiler
+      -> fragmento WHERE + parâmetros vinculados ({expr_0:UInt16}, ...)
+```
+
+- **Nunca** há concatenação de texto do usuário no SQL: todo valor vira parâmetro vinculado.
+- `direction == inbound` → `isIPAddressInRange(dst_ip, <redes internas>)`; `outbound` →
+  `src_ip`; `both` → ambos. As redes internas default são RFC1918 + loopback + link-local +
+  CGNAT (`100.64.0.0/10`) + ULA, sobrescrevíveis por `GMJFLOW_FLOW_INTERNAL_CIDRS`.
+- `proto == udp` → `proto = {p:UInt8}`; `proto == ip` significa "qualquer protocolo".
+- `tcp_flags contains syn` → `bitAnd(tcp_flags, {p:UInt16}) != 0` (bitmask, mesma semântica
+  do detector). **Atenção:** o filtro legado `tcp_flags=syn` é **igualdade exata** — o
+  resultado de `contains` é um superconjunto quando o flow tem outros bits setados
+  (ex.: SYN+ACK).
+- `decoder == X` reutiliza o mesmo `decoder_clickhouse_condition` do detector.
+- IP/CIDR usam as mesmas funções do backend (`clickhouse_ip_string_param` /
+  `clickhouse_cidr_string_param`, com o mapeamento `::ffff:` das colunas IPv6).
+- Campos sem coluna física no `flow_raw` (`sensor_id`, `icmp_type`, `icmp_code`) são
+  recusados com `FIELD_NOT_AVAILABLE_IN_FLOW_SEARCH` (use `sensor` ou o filtro legado
+  `sensor_id`).
+
+### 10.3 Limites de custo
+
+Além do `range_minutes` e do `limit` já existentes:
+
+| Limite | Valor |
+|---|---|
+| comprimento da expressão | 2000 caracteres |
+| profundidade da AST | 12 |
+| número de condições | 40 |
+| itens por lista `IN`/`NOT IN` | 64 |
+| tamanho da regex (`matches`) | 200 caracteres |
+
+Violações retornam `400` com `code` estável: `EXPRESSION_TOO_LONG`, `AST_TOO_DEEP`,
+`TOO_MANY_CONDITIONS`, `IN_LIST_TOO_LARGE`, `REGEX_TOO_LONG`.
+
+### 10.4 Erros estruturados
+
+`400` com `{"detail": {"code", "message", "errors": [{code, message, field, ...}]}}`.
+Exemplos: `FORBIDDEN_CHARACTER` (SQL livre), `FIELD_NOT_ALLOWED_IN_SECTION` (usar `pps` no
+Flow Search), `UNKNOWN_FIELD`, `REGEX_NOT_ALLOWED`, `CONTAINS_REQUIRES_FLAGS`.
+
+### 10.5 Exemplos para o operador
+
+```text
+proto == udp and src_port == 53 and direction == inbound      # DNS reflection inbound
+proto == udp and src_port == 123 and direction == inbound     # NTP reflection inbound
+proto == udp and src_port == 1900 and direction == inbound    # SSDP inbound
+proto == udp and src_port == 11211 and direction == inbound   # Memcached inbound
+proto == tcp and tcp_flags contains syn and direction == inbound
+proto == tcp and tcp_flags contains syn and tcp_flags contains ack and direction == inbound
+proto == icmp and direction == inbound
+src_ip in 100.64.0.0/10
+sensor matches "^FIBINET-"
+```
+
+Esses exemplos são **queries de investigação**, não vetores.
+
+### 10.6 Comparação legacy × expressão (dados reais, janela de 60 min)
+
+| Consulta | Legacy | Expressão |
+|---|---|---|
+| `proto=udp` + `src_port=53` | 44 061 | 44 061 |
+| `proto=udp` + `src_port=123` | 686 | 686 |
+| `src_ip=100.64.0.0/10` | 61 230 | 61 230 |
+| `sensor=NE8000-BGP-FIBINET` | 3 339 752 | 3 339 752 |
+| `expression(proto==udp)` + `src_port=53` | — | 44 047 (igual à expressão completa) |
+| `tcp_flags=syn` (igualdade) | 69 514 | 109 006 (`contains syn`, bitmask) |
+
+Validado também que toda linha retornada por `proto == udp and src_port == 53` tem
+`proto=17` e `src_port=53`, e que `direction == inbound/outbound` não devolveu nenhuma
+linha com o lado interno fora das redes configuradas.
+
+---
+
+## 11. Segurança
 
 - **Nunca SQL livre:** `;`, `'` e backtick são rejeitados na tokenização
   (`FORBIDDEN_CHARACTER`) antes de qualquer interpretação.
@@ -290,7 +396,7 @@ O serializer é determinístico: `parse(serialize(ast))` é semanticamente igual
 
 ---
 
-## 11. Compatibilidade histórica
+## 12. Compatibilidade histórica
 
 - As colunas históricas do banco (`proto`, `direction` em `anomaly_events` etc.) **não mudam**.
 - A canonicalização (`transmits` → `outbound`, `proto` → `protocol`, `pps` → `packets_s`)
@@ -301,42 +407,45 @@ O serializer é determinístico: `parse(serialize(ast))` é semanticamente igual
 
 ---
 
-## 12. Relação com Flow Search e Vetores de Ataque
+## 13. Relação com Flow Search e Vetores de Ataque
 
 - **Vetores de Ataque (hoje):** cada vetor é um conjunto de colunas fixas
   (`domain`, `direction`, `decoder`, `metric`, `comparison`, thresholds). A DSL é o
   vocabulário que permitirá representar esse mesmo vetor como regra (`MATCH` + `TRIGGER`)
   sem duplicar regra no frontend.
-- **Flow Search (Fase 2):** hoje `GET /api/flows/search` aceita filtros por coluna
-  (`src_ip`, `dst_ip`, `port`, `proto`, `tcp_flags`, `decoder`, …). A Fase 2 vai aceitar
-  **expressão** (`parse_expression` + `validate_expression`, seção `MATCH`) e compilar a
-  AST para ClickHouse, mantendo os filtros por coluna como legado.
+- **Flow Search (Fase 2, entregue):** `GET /api/flows/search` aceita filtros por coluna
+  (`src_ip`, `dst_ip`, `port`, `proto`, `tcp_flags`, `decoder`, …) **e** `expression=`
+  (seção `MATCH`), combinados com AND; a AST é compilada para o `WHERE` do ClickHouse com
+  parâmetros vinculados. Ver seção 10.
 - **Dicionário/UI:** a UI deve consumir `GET /api/rule-language/catalog`; **não** duplicar
   o catálogo no frontend.
 
 ---
 
-## 13. Como validar / testar
+## 14. Como validar / testar
 
 ```bash
 python3 -m unittest tests.test_detection_dsl_catalog tests.test_detection_dsl_parser \
   tests.test_detection_dsl_roundtrip tests.test_detection_dsl_units \
-  tests.test_detection_dsl_validator tests.test_detection_dsl_language
+  tests.test_detection_dsl_validator tests.test_detection_dsl_language \
+  tests.test_detection_dsl_compiler
 ```
 
 Testes cobertos: parser, aliases, canonicalização de `direction`, unidades, operador por
 tipo, regex permitido/bloqueado, MATCH vs TRIGGER, group_by, campos inválidos, SQL injection
-rejeitado, round-trip do serializer, dicionário e endpoint.
+rejeitado, round-trip do serializer, dicionário, endpoint, compilador (igualdade,
+desigualdade, `IN`/`NOT IN`, `BETWEEN`, CIDR, direction, flags, `matches`, AND/OR/NOT,
+parênteses, aliases, parâmetros vinculados e limites de complexidade).
 
 ---
 
-## 14. Próximo passo (Fase 2 — Flow Search por expressão)
+## 15. Próximos passos (Fase 3)
 
-1. expor o texto da expressão no Flow Search e validar via `validate_expression` (seção `MATCH`);
-2. compilar o `BooleanNode` (MATCH) para o `WHERE` do ClickHouse — **sem** concatenar texto do usuário;
-3. manter `GET /api/flows/search` legado funcionando (filtros por coluna);
-4. reaproveitar `catalog_json()` na UI (builder/autocomplete) — sem duplicar catálogo;
-5. só depois avaliar parser → AST nos Vetores de Ataque (sem migrar regras existentes).
+1. Builder visual de regras (UI) reaproveitando `catalog_json()` e o `summarize()` da AST;
+2. representar os **Vetores de Ataque** existentes como `MATCH` + `TRIGGER` (sem migrar nem
+   consolidar regras produtivas nesta etapa);
+3. avaliar persistência versionada da AST (migration) somente quando o modelo estiver estável;
+4. reavaliar o gap temporal do detector e as 28 regras duplicadas — **fora** do escopo da DSL.
 
 Regra: qualquer alteração de arquitetura/fluxo deve atualizar este documento **no mesmo
 trabalho**.
