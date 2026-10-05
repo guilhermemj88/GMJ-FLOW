@@ -528,3 +528,15 @@ table.v2-dense tbody tr:hover td{background:#0d1a29}
 .v2-master-item.on{border-color:#2b4a6e;box-shadow:inset 3px 0 0 var(--info)}
 .v2-master-item b{font-size:12px}
 .v2-link{color:#7cc0ff;text-decoration:none}
+
+/* ------------------- Flow Search: modo Expressão (DSL) ------------------- */
+.v2-mode{display:inline-flex;gap:4px;align-items:flex-end;padding-bottom:1px}
+.v2-mode .v2-tab{padding:5px 10px;border-radius:6px;border-bottom:1px solid var(--border)}
+.v2-expression{padding:10px 12px;border-bottom:1px solid var(--border);display:grid;gap:7px}
+.v2-expression-bar{display:flex;gap:7px;align-items:center;flex-wrap:wrap}
+.v2-expr-input{
+  flex:1 1 420px;min-width:280px;background:#06101c;border:1px solid var(--border);border-radius:6px;
+  color:var(--text);font-size:11px;padding:7px 9px;
+}
+.v2-expression-status{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.v2-expression-examples{display:flex;flex-wrap:wrap;gap:5px}

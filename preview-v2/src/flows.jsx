@@ -21,17 +21,43 @@ const TOP_TYPES = [
   ['input_if', 'Ingress ifIndex'], ['output_if', 'Egress ifIndex'], ['sensor', 'Sensor'],
 ];
 
+// Exemplos de investigação (NÃO são vetores): apenas queries MATCH.
+const EXPRESSION_EXAMPLES = [
+  ['DNS reflection inbound', 'proto == udp and src_port == 53 and direction == inbound'],
+  ['NTP reflection inbound', 'proto == udp and src_port == 123 and direction == inbound'],
+  ['SSDP inbound', 'proto == udp and src_port == 1900 and direction == inbound'],
+  ['Memcached inbound', 'proto == udp and src_port == 11211 and direction == inbound'],
+  ['TCP SYN inbound', 'proto == tcp and tcp_flags contains syn and direction == inbound'],
+  ['TCP SYN-ACK inbound', 'proto == tcp and tcp_flags contains syn and tcp_flags contains ack and direction == inbound'],
+  ['ICMP inbound', 'proto == icmp and direction == inbound'],
+];
+
 const EMPTY = {
   range: 60, src_ip: '', dst_ip: '', src_port: '', dst_port: '', port: '',
   proto: '', decoder: '', tcp_flags: '', sensor: '', if_index: '', limit: 200, order_by: 'flow_time', order_dir: 'desc',
+  expression: '',
 };
 
 function qs(form) {
   const params = new URLSearchParams();
   Object.entries(form).forEach(([key, value]) => {
+    if (key === 'expression') return; // expressão só é enviada no modo Expressão
     if (value !== '' && value !== null && value !== undefined) params.set(key, String(value));
   });
   params.set('range_minutes', String(form.range));
+  return params.toString();
+}
+
+// Modo Expressão: período/limite/ordenação + `expression` (seção MATCH).
+// Se filtros legados também forem enviados, o backend combina com AND.
+function expressionQs(form) {
+  const params = new URLSearchParams();
+  params.set('range_minutes', String(form.range));
+  params.set('limit', String(form.limit));
+  params.set('order_by', form.order_by);
+  params.set('order_dir', form.order_dir);
+  const expression = String(form.expression || '').trim();
+  if (expression) params.set('expression', expression);
   return params.toString();
 }
 
@@ -73,10 +99,88 @@ function FlowRow({ row }) {
   );
 }
 
+// Dicionário: consome GET /api/rule-language/catalog (nada duplicado no frontend).
+// Mostra apenas os campos com match_allowed = true (seção MATCH do Flow Search).
+function DictionaryDrawer({ onClose, onPick }) {
+  const data = useApi('/api/rule-language/catalog');
+  const fields = (data.data?.fields || []).filter((item) => item.match_allowed);
+  const columns = [
+    {
+      key: 'name',
+      label: 'Campo',
+      render: (r) => (
+        <span className="mono">
+          <b>{r.text_name || r.name}</b>
+          {r.text_name && r.text_name !== r.name ? <small>{r.name}</small> : null}
+        </span>
+      ),
+    },
+    { key: 'aliases', label: 'Alias', render: (r) => (r.aliases?.length ? <span className="mono">{r.aliases.join(', ')}</span> : '—') },
+    { key: 'description', label: 'Descrição' },
+    { key: 'type', label: 'Tipo' },
+    { key: 'operators', label: 'Operadores', render: (r) => <span className="mono">{(r.operators || []).join(' ') || '—'}</span> },
+    { key: 'examples', label: 'Exemplos', render: (r) => (r.examples?.length ? <span className="mono">{r.examples[0]}</span> : '—') },
+    { key: 'use', label: '', render: (r) => <button type="button" className="v2-mini" onClick={() => onPick(r.text_name || r.name)}>usar</button> },
+  ];
+  return (
+    <div className="overlay" role="dialog" aria-modal="true" aria-label="Dicionário da linguagem de regras" onClick={onClose}>
+      <aside className="drawer" style={{ width: 'min(980px, 96vw)' }} onClick={(event) => event.stopPropagation()}>
+        <header>
+          <div>
+            <Badge tone="info">Dicionário</Badge>
+            <h2>Campos do Flow Search</h2>
+            <p>GET /api/rule-language/catalog · somente campos com match_allowed = true · nenhuma lista duplicada no frontend</p>
+          </div>
+          <button type="button" onClick={onClose} aria-label="Fechar">×</button>
+        </header>
+        <section>
+          {data.loading ? <Loading /> : data.error ? <ErrorBox message={data.error} /> : (
+            <Table
+              columns={columns}
+              rows={fields}
+              keyFor={(r) => r.name}
+              empty={<EmptyState title="Catálogo indisponível" hint="O endpoint /api/rule-language/catalog responde no backend atual." />}
+            />
+          )}
+        </section>
+      </aside>
+    </div>
+  );
+}
+
 function Registros({ form, setForm, query, setQuery, onAskInterface }) {
   const data = useApi(`/api/flows/search?${query}`, { deps: [query] });
   const items = data.data?.items || [];
   const [downloading, setDownloading] = useState('');
+  const [mode, setMode] = useState('filtros');
+  const [validation, setValidation] = useState(null);
+  const [validating, setValidating] = useState(false);
+  const [dictionaryOpen, setDictionaryOpen] = useState(false);
+
+  // Valida/preview (não executa query) e, quando solicitado, executa a busca.
+  const validateExpression = async (execute) => {
+    const expression = String(form.expression || '').trim();
+    if (!expression) {
+      setValidation({ valid: false, canonical_expression: null, errors: [{ code: 'EMPTY_EXPRESSION', message: 'Informe uma expressão (ex.: proto == udp and src_port == 53).' }] });
+      return;
+    }
+    setValidating(true);
+    try {
+      const result = await api(`/api/flows/expression/validate?expression=${encodeURIComponent(expression)}`);
+      setValidation(result);
+      if (result.valid && execute) setQuery(expressionQs(form));
+    } catch (err) {
+      setValidation({ valid: false, canonical_expression: null, errors: [{ code: 'REQUEST_FAILED', message: err.message }] });
+    } finally {
+      setValidating(false);
+    }
+  };
+
+  const pickFromDictionary = (token) => {
+    const current = String(form.expression || '');
+    const joiner = current && !/\s$/.test(current) ? ' ' : '';
+    setForm({ ...form, expression: `${current}${joiner}${token} ` });
+  };
 
   const download = async (format) => {
     setDownloading(format);
@@ -110,26 +214,34 @@ function Registros({ form, setForm, query, setQuery, onAskInterface }) {
       badgeTone={data.error ? 'warning' : 'info'}
       filters={
         <div className="v2-filters">
+          <div className="v2-mode">
+            <button type="button" className={mode === 'filtros' ? 'v2-tab active' : 'v2-tab'} onClick={() => { setMode('filtros'); setValidation(null); }}>Filtros</button>
+            <button type="button" className={mode === 'expressao' ? 'v2-tab active' : 'v2-tab'} onClick={() => setMode('expressao')}>Expressão</button>
+          </div>
           <label className="v2-field"><span>Período</span>
             <select value={form.range} onChange={(e) => setForm({ ...form, range: Number(e.target.value) })}>
               {RANGES.map(([v, t]) => <option key={v} value={v}>{t}</option>)}
             </select>
           </label>
-          {field('src_ip', 'SRC IP/CIDR', '45.168.202.0/24')}
-          {field('dst_ip', 'DST IP/CIDR', '203.0.113.9')}
-          {field('src_port', 'SRC port', 'any')}
-          {field('dst_port', 'DST port', '61810')}
-          {field('port', 'Porta (src ou dst)')}
-          <label className="v2-field"><span>Protocolo</span>
-            <select value={form.proto} onChange={(e) => setForm({ ...form, proto: e.target.value })}>
-              <option value="">todos</option><option value="udp">udp</option><option value="tcp">tcp</option>
-              <option value="icmp">icmp</option><option value="17">17</option><option value="6">6</option>
-            </select>
-          </label>
-          {field('decoder', 'Decoder', 'DNS, UDP…')}
-          {field('tcp_flags', 'TCP flags', 'SYN')}
-          {field('sensor', 'Sensor', 'NE8000-F1A-IMPLANTAR')}
-          {field('if_index', 'Interface (ifIndex)', '90')}
+          {mode === 'filtros' ? (
+            <>
+              {field('src_ip', 'SRC IP/CIDR', '45.168.202.0/24')}
+              {field('dst_ip', 'DST IP/CIDR', '203.0.113.9')}
+              {field('src_port', 'SRC port', 'any')}
+              {field('dst_port', 'DST port', '61810')}
+              {field('port', 'Porta (src ou dst)')}
+              <label className="v2-field"><span>Protocolo</span>
+                <select value={form.proto} onChange={(e) => setForm({ ...form, proto: e.target.value })}>
+                  <option value="">todos</option><option value="udp">udp</option><option value="tcp">tcp</option>
+                  <option value="icmp">icmp</option><option value="17">17</option><option value="6">6</option>
+                </select>
+              </label>
+              {field('decoder', 'Decoder', 'DNS, UDP…')}
+              {field('tcp_flags', 'TCP flags', 'SYN')}
+              {field('sensor', 'Sensor', 'NE8000-F1A-IMPLANTAR')}
+              {field('if_index', 'Interface (ifIndex)', '90')}
+            </>
+          ) : null}
           <label className="v2-field"><span>Limite</span>
             <select value={form.limit} onChange={(e) => setForm({ ...form, limit: Number(e.target.value) })}>
               {[50, 200, 500, 1000, 2000].map((v) => <option key={v} value={v}>{v}</option>)}
@@ -145,13 +257,50 @@ function Registros({ form, setForm, query, setQuery, onAskInterface }) {
               <option value="desc">desc</option><option value="asc">asc</option>
             </select>
           </label>
-          <button type="button" className="primary" onClick={() => setQuery(qs(form))}>Buscar</button>
+          <button type="button" className="primary" onClick={() => (mode === 'expressao' ? validateExpression(true) : setQuery(qs(form)))}>Buscar</button>
           <button type="button" className="control" onClick={() => { setForm(EMPTY); setQuery(qs(EMPTY)); }}>Limpar</button>
           <button type="button" className="control" disabled={downloading === 'csv'} onClick={() => download('csv')}>CSV (GET)</button>
           <button type="button" className="control" disabled={downloading === 'pdf'} onClick={() => download('pdf')}>PDF (GET)</button>
         </div>
       }
     >
+      {mode === 'expressao' ? (
+        <div className="v2-expression">
+          <div className="v2-expression-bar">
+            <input
+              className="v2-expr-input mono"
+              value={form.expression || ''}
+              placeholder="proto == udp and src_port == 53 and direction == inbound"
+              onChange={(e) => setForm({ ...form, expression: e.target.value })}
+              onKeyDown={(e) => { if (e.key === 'Enter') validateExpression(true); }}
+            />
+            <button type="button" className="control" onClick={() => setDictionaryOpen(true)}>Dicionário</button>
+            <button type="button" className="control" disabled={validating} onClick={() => validateExpression(false)}>{validating ? 'Validando…' : 'Validar'}</button>
+            <button type="button" className="primary" disabled={validating} onClick={() => validateExpression(true)}>Executar busca</button>
+          </div>
+          <div className="v2-note">
+            Somente a seção MATCH (linhas reais de flow_raw). Se filtros legados forem enviados junto, o backend combina com AND.
+          </div>
+          {validation ? (
+            <div className="v2-expression-status">
+              <Badge tone={validation.valid ? 'success' : 'warning'}>{validation.valid ? 'expressão válida' : 'expressão inválida'}</Badge>
+              {validation.canonical_expression ? <span className="v2-note mono">canônica: {validation.canonical_expression}</span> : null}
+              {(validation.fields || []).length ? <span className="v2-note mono">campos: {validation.fields.join(', ')}</span> : null}
+              {(validation.errors || []).map((issue, index) => (
+                <div key={`${issue.code}-${index}`} className="v2-note" style={{ color: 'var(--critical)' }}>
+                  {issue.code}: {issue.message}{issue.suggestion ? ` — ${issue.suggestion}` : ''}
+                </div>
+              ))}
+            </div>
+          ) : null}
+          <div className="v2-expression-examples">
+            {EXPRESSION_EXAMPLES.map(([label, expr]) => (
+              <button key={label} type="button" className="v2-mini" title={expr} onClick={() => { setForm({ ...form, expression: expr }); setValidation(null); }}>{label}</button>
+            ))}
+          </div>
+        </div>
+      ) : null}
+      {dictionaryOpen ? <DictionaryDrawer onClose={() => setDictionaryOpen(false)} onPick={pickFromDictionary} /> : null}
       {data.error ? <ErrorBox message={data.error} /> : null}
       {data.loading ? <Loading /> : (
         <div className="v2-dense-wrap">
