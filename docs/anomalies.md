@@ -115,6 +115,19 @@ A deduplicacao usa:
 attack_vector_id + target_ip + sensor_id + interface_if_index + decoder + direction
 ```
 
+### Desempenho do ciclo (PERF-A)
+
+O motor de `detection_template_rules` executa 1 query ClickHouse por par (regra x zona/prefixo),
+o que hoje resulta em ~210 queries por ciclo. A otimizacao PERF-A (2026-10-05) reduziu o
+ciclo de ~163 s para ~44 s (ClickHouse: 147 s -> 28 s) sem alterar nenhum resultado:
+
+1. poda das condicoes redundantes do `multiIf` de sample-rate (476 -> 18);
+2. `uniqExact` trivial (=1 quando a coluna ja esta no `GROUP BY`) virou constante;
+3. cache de scans por ciclo (`DetectionScanCache`, SQL + parametros identicos).
+
+Detalhes, medicao completa, prova de equivalencia, cursor/watermark (PERF-B) e paralelismo
+(PERF-C) estao em `docs/detection-performance.md`.
+
 ## Teste de vetor
 
 Na tela **Vetores de Ataque**, cada linha possui o botao **Testar agora**. O botao executa imediatamente o vetor nos ultimos 60 segundos e abre um modal com:

@@ -31614,6 +31614,43 @@ def filter_flows_for_outbound_dst_port_event(event: dict[str, Any], flows: list[
     return [flow for flow in flows if flow_matches_outbound_dst_port_scope(flow, event)]
 
 
+class DetectionScanCache:
+    """Cache de scans de UM ciclo do detector, com teto de linhas.
+
+    Chave = (SQL, parametros). Duas regras que geram exatamente o mesmo scan
+    recebem as MESMAS linhas (resultado deterministico dentro do ciclo), sem
+    alterar nenhum resultado. O teto evita inflar memoria em janelas grandes.
+    """
+
+    def __init__(self, max_rows: int = 30000) -> None:
+        self._rows: dict[Any, list[dict[str, Any]]] = {}
+        self._max_rows = max(1, int(max_rows))
+        self._total_rows = 0
+        self.hits = 0
+        self.misses = 0
+
+    def get(self, key: Any) -> list[dict[str, Any]] | None:
+        cached = self._rows.get(key)
+        if cached is None:
+            self.misses += 1
+        else:
+            self.hits += 1
+        return cached
+
+    def put(self, key: Any, rows: list[dict[str, Any]]) -> None:
+        if key in self._rows:
+            return
+        size = len(rows)
+        if self._total_rows + size > self._max_rows:
+            return
+        self._rows[key] = rows
+        self._total_rows += size
+
+    @property
+    def total_rows(self) -> int:
+        return self._total_rows
+
+
 def query_detection_rule_candidates(
     zone: dict[str, Any],
     template: dict[str, Any],
@@ -31625,6 +31662,7 @@ def query_detection_rule_candidates(
     limit: int = 1000,
     include_unmatched: bool = False,
     active_codecs: list[dict[str, Any]] | None = None,
+    query_cache: DetectionScanCache | None = None,
 ) -> list[dict[str, Any]]:
     warning = rule.get("warning_value")
     critical = rule.get("critical_value")
@@ -31656,6 +31694,14 @@ def query_detection_rule_candidates(
         dst_expr = "toString(flow_raw.dst_ip)"
     if group_by_dst_port:
         dst_port_expr = "dst_port"
+
+    # uniqExact sobre uma coluna que JA faz parte do GROUP BY e sempre 1
+    # (o valor e constante dentro do grupo). Substituir por constante evita
+    # montar hash-set por grupo sem alterar o resultado.
+    dst_ip_is_group_key = dst_expr == "toString(flow_raw.dst_ip)"
+    unique_dst_ips_expr = "toUInt64(1)" if dst_ip_is_group_key else "uniqExact(unique_dst_ip_value)"
+    unique_dst_ports_expr = "toUInt64(1)" if group_by_dst_port else "uniqExact(unique_dst_port_value)"
+    unique_src_ports_expr = "toUInt64(1)" if group_by_src_port else "uniqExact(unique_src_port_value)"
 
     window_seconds = max(1, int(rule.get("window_seconds") or 60))
     protocol_expr = detection_protocol_label_expr(rule.get("protocol") or "ALL")
@@ -31712,8 +31758,7 @@ def query_detection_rule_candidates(
     final_src_port_expr = "src_port," if group_by_src_port else ""
     grouped_dst_port_expr = "dst_port" if group_by_dst_port else "argMax(unique_dst_port_value, packet_value * multiplier) AS dst_port"
     grouped_top_dst_port_expr = "dst_port AS top_dst_port" if group_by_dst_port else "argMax(unique_dst_port_value, packet_value * multiplier) AS top_dst_port"
-    result = query_clickhouse(
-        f"""
+    query_text = f"""
         WITH base AS (
             SELECT
                 toStartOfInterval(flow_time, INTERVAL {window_seconds} SECOND) AS bucket,
@@ -31751,9 +31796,9 @@ def query_detection_rule_candidates(
                 sum(packet_value * multiplier) AS packets,
                 sumIf(packet_value * multiplier, src_port = 443) AS specific_packets,
                 sum(flow_value) AS flows,
-                uniqExact(unique_dst_ip_value) AS unique_dst_ips,
-                uniqExact(unique_dst_port_value) AS unique_dst_ports,
-                uniqExact(unique_src_port_value) AS unique_src_ports,
+                {unique_dst_ips_expr} AS unique_dst_ips,
+                {unique_dst_ports_expr} AS unique_dst_ports,
+                {unique_src_ports_expr} AS unique_src_ports,
                 min(flow_time) AS first_seen,
                 max(flow_time) AS last_seen,
                 uniqExact(detected_exporter_ip_raw) AS detected_exporter_count,
@@ -31790,11 +31835,22 @@ def query_detection_rule_candidates(
         FROM grouped
         ORDER BY metric_value DESC
         LIMIT {{limit:UInt32}}
-        """,
-        params,
-    )
+        """
+    # Cache por ciclo: SQL + parametros identicos => MESMAS linhas. Evita refazer
+    # scans realmente duplicados (mesma regra/prefixo ou regras equivalentes) sem
+    # alterar nenhum resultado, pois o resultado e deterministico dentro do ciclo.
+    cache_key: tuple[Any, ...] | None = None
+    raw_rows: list[dict[str, Any]] | None = None
+    if query_cache is not None:
+        cache_key = (query_text, tuple(sorted((key, str(value)) for key, value in params.items())))
+        raw_rows = query_cache.get(cache_key)
+    if raw_rows is None:
+        result = query_clickhouse(query_text, params)
+        raw_rows = rows_as_dicts(result)
+        if query_cache is not None and cache_key is not None:
+            query_cache.put(cache_key, raw_rows)
     items = []
-    for row in rows_as_dicts(result):
+    for row in raw_rows:
         if clean_text(rule.get("vector")).upper() == DNS_SINGLE_FLOW_OUTBOUND_VECTOR:
             if int(row.get("dst_port") or row.get("top_dst_port") or 0) != 53:
                 continue
@@ -36615,6 +36671,7 @@ def evaluate_detection_template_rule(
     *,
     create_anomalies: bool = True,
     active_codecs: list[dict[str, Any]] | None = None,
+    query_cache: DetectionScanCache | None = None,
 ) -> dict[str, Any]:
     rule = detection_rule_row_to_dict(raw_rule)
     template = {
@@ -36672,6 +36729,7 @@ def evaluate_detection_template_rule(
                 rule.get("sensor_id"),
                 include_unmatched=True,
                 active_codecs=active_codecs,
+                query_cache=query_cache,
             )
         except Exception as exc:
             reason = f"query_error:{clean_text(exc)}"
@@ -36750,13 +36808,23 @@ def run_detection_template_rules_once(*, create_anomalies: bool = True) -> dict[
     skipped_reasons: dict[str, int] = {}
     anomalies_created = 0
     enabled_count = 0
+    # Cache de scans por ciclo (SQL+params identicos). Reduz queries repetidas
+    # sem alterar nenhum resultado — ver docs/detection-performance.md.
+    query_cache = DetectionScanCache()
     try:
         with sqlite_connection() as conn:
             rows = detection_template_rule_rows(conn)
             active_codecs = list_flow_codecs(conn, active_only=True)
             enabled_count = sum(1 for row in rows if sqlite_bool(row.get("enabled")) and sqlite_bool(row.get("template_active")))
             for row in rows:
-                result = evaluate_detection_template_rule(conn, row, end_dt, create_anomalies=create_anomalies, active_codecs=active_codecs)
+                result = evaluate_detection_template_rule(
+                    conn,
+                    row,
+                    end_dt,
+                    create_anomalies=create_anomalies,
+                    active_codecs=active_codecs,
+                    query_cache=query_cache,
+                )
                 results.append(result)
                 anomalies_created += int(result.get("anomalies_created") or 0)
                 reason = clean_text(result.get("skipped_reason"))
@@ -36786,6 +36854,11 @@ def run_detection_template_rules_once(*, create_anomalies: bool = True) -> dict[
             "rules_evaluated": len(results),
             "anomalies_created": anomalies_created,
             "skipped_reasons": skipped_reasons,
+            "scan_cache": {
+                "queries_executed": query_cache.misses,
+                "queries_reused": query_cache.hits,
+                "rows_cached": query_cache.total_rows,
+            },
             "items": results,
         }
     except Exception as exc:
@@ -44680,27 +44753,35 @@ def clickhouse_sample_rate_expr(
             except ValueError:
                 continue
             interfaces = sensor_config.get("interfaces") if isinstance(sensor_config.get("interfaces"), dict) else {}
+            default_in = int(sensor_config.get("default_in") or 1)
+            default_out = int(sensor_config.get("default_out") or 1)
             for index in interfaces:
                 if if_index is not None and int(index) != int(if_index):
                     continue
                 if direction == "input":
                     rate = effective_sample_rate_from_config(sensor_config, index, "input")
-                    conditions.append(f"{exporter_condition} AND input_if = {int(index)}, {sample_rate_literal(rate)}")
+                    # Condicao redundante: o default do sensor (abaixo) ja cobre este if_index
+                    # com o MESMO rate -> resultado identico e expressao muito menor.
+                    if rate != default_in:
+                        conditions.append(f"{exporter_condition} AND input_if = {int(index)}, {sample_rate_literal(rate)}")
                 elif direction == "output":
                     rate = effective_sample_rate_from_config(sensor_config, index, "output")
-                    conditions.append(f"{exporter_condition} AND output_if = {int(index)}, {sample_rate_literal(rate)}")
+                    if rate != default_out:
+                        conditions.append(f"{exporter_condition} AND output_if = {int(index)}, {sample_rate_literal(rate)}")
                 else:
                     rate_in = effective_sample_rate_from_config(sensor_config, index, "input")
                     rate_out = effective_sample_rate_from_config(sensor_config, index, "output")
-                    conditions.append(f"{exporter_condition} AND input_if = {int(index)}, {sample_rate_literal(rate_in)}")
-                    conditions.append(f"{exporter_condition} AND output_if = {int(index)}, {sample_rate_literal(rate_out)}")
+                    if rate_in != default_in:
+                        conditions.append(f"{exporter_condition} AND input_if = {int(index)}, {sample_rate_literal(rate_in)}")
+                    if rate_out != default_out:
+                        conditions.append(f"{exporter_condition} AND output_if = {int(index)}, {sample_rate_literal(rate_out)}")
             if direction == "input":
-                conditions.append(f"{exporter_condition} AND input_if > 0, {sample_rate_literal(sensor_config['default_in'])}")
+                conditions.append(f"{exporter_condition} AND input_if > 0, {sample_rate_literal(default_in)}")
             elif direction == "output":
-                conditions.append(f"{exporter_condition} AND output_if > 0, {sample_rate_literal(sensor_config['default_out'])}")
+                conditions.append(f"{exporter_condition} AND output_if > 0, {sample_rate_literal(default_out)}")
             else:
-                conditions.append(f"{exporter_condition} AND input_if > 0, {sample_rate_literal(sensor_config['default_in'])}")
-                conditions.append(f"{exporter_condition} AND output_if > 0, {sample_rate_literal(sensor_config['default_out'])}")
+                conditions.append(f"{exporter_condition} AND input_if > 0, {sample_rate_literal(default_in)}")
+                conditions.append(f"{exporter_condition} AND output_if > 0, {sample_rate_literal(default_out)}")
         return f"multiIf({', '.join(conditions)}, {fallback})" if conditions else fallback
     if not config:
         return fallback
@@ -44710,25 +44791,35 @@ def clickhouse_sample_rate_expr(
         conditions.append(f"{field} = {int(index)}, {sample_rate_literal(rate)}")
 
     interfaces = config.get("interfaces") if isinstance(config.get("interfaces"), dict) else {}
+    config_default_in = int(config["default_in"] or 1)
+    config_default_out = int(config["default_out"] or 1)
     for index in interfaces:
         if if_index is not None and int(index) != int(if_index):
             continue
         if direction == "input":
-            add_condition("input_if", index, effective_sample_rate_from_config(config, index, "input"))
+            rate = effective_sample_rate_from_config(config, index, "input")
+            if rate != config_default_in:
+                add_condition("input_if", index, rate)
         elif direction == "output":
-            add_condition("output_if", index, effective_sample_rate_from_config(config, index, "output"))
+            rate = effective_sample_rate_from_config(config, index, "output")
+            if rate != config_default_out:
+                add_condition("output_if", index, rate)
         else:
-            add_condition("input_if", index, effective_sample_rate_from_config(config, index, "input"))
-            add_condition("output_if", index, effective_sample_rate_from_config(config, index, "output"))
+            rate_in = effective_sample_rate_from_config(config, index, "input")
+            rate_out = effective_sample_rate_from_config(config, index, "output")
+            if rate_in != config_default_in:
+                add_condition("input_if", index, rate_in)
+            if rate_out != config_default_out:
+                add_condition("output_if", index, rate_out)
 
     if direction == "input":
-        default_fallback = sample_rate_literal(config["default_in"])
+        default_fallback = sample_rate_literal(config_default_in)
     elif direction == "output":
-        default_fallback = sample_rate_literal(config["default_out"])
+        default_fallback = sample_rate_literal(config_default_out)
     else:
         default_fallback = (
-            f"multiIf(input_if > 0, {sample_rate_literal(config['default_in'])}, "
-            f"output_if > 0, {sample_rate_literal(config['default_out'])}, {fallback})"
+            f"multiIf(input_if > 0, {sample_rate_literal(config_default_in)}, "
+            f"output_if > 0, {sample_rate_literal(config_default_out)}, {fallback})"
         )
     return f"multiIf({', '.join(conditions)}, {default_fallback})" if conditions else default_fallback
 
