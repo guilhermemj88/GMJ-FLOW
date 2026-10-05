@@ -30,7 +30,7 @@ GET /api/flows/search?range_minutes=60&expression=proto%20==%20udp%20and%20src_p
 
 `expression` e filtros legados podem ser combinados; a combinacao e **AND**. Sem `expression`, o comportamento antigo permanece igual. Para validar/preview sem executar query use `GET /api/flows/expression/validate?expression=...`, que devolve `valid`, `canonical_expression`, AST resumida, campos e erros estruturados.
 
-Limites de protecao: 2000 caracteres por expressao, 40 condicoes, profundidade 12, 64 itens por lista `IN`/`NOT IN` e 200 caracteres de regex. `direction == inbound/outbound` filtra pelo IP interno no destino/origem usando a lista de redes internas (default RFC1918 + loopback + link-local + CGNAT + ULA, sobrescrevivel por `GMJFLOW_FLOW_INTERNAL_CIDRS`).
+Limites de protecao: 2000 caracteres por expressao, 40 condicoes, profundidade 12, 64 itens por lista `IN`/`NOT IN` e 200 caracteres de regex. `direction == inbound/outbound` filtra pelo IP interno no destino/origem usando as redes internas: primeiro `GMJFLOW_FLOW_INTERNAL_CIDRS` (override), senao os prefixos ativos das zonas (`ip_zones`/`ip_zone_prefixes`), senao o default RFC1918 + loopback + link-local + CGNAT + ULA.
 
 A semantica completa (campos, operadores, exemplos e comparacao legacy x expressao) esta em `docs/detection-rule-language.md`.
 

@@ -50234,15 +50234,52 @@ def flow_search_flow_raw_schema() -> dict[str, str]:
     return schema
 
 
-def flow_search_internal_networks() -> tuple[str, ...]:
-    """Redes internas usadas por `direction == inbound/outbound` (configuravel).
+_FLOW_SEARCH_NETWORKS_CACHE: dict[str, Any] = {"networks": None, "at": 0.0}
+FLOW_SEARCH_MAX_INTERNAL_NETWORKS = 300
 
-    Default do catalogo da DSL (RFC1918 + loopback + link-local + CGNAT + ULA).
-    Sobrescrevivel por GMJFLOW_FLOW_INTERNAL_CIDRS (lista separada por virgula).
+
+def flow_search_internal_networks() -> tuple[str, ...]:
+    """Redes internas usadas por `direction == inbound/outbound`.
+
+    Ordem: override explicito (GMJFLOW_FLOW_INTERNAL_CIDRS) -> prefixos ativos das
+    `ip_zones` (mesma nocao de "interno" usada pelo detector/zonas) -> default do
+    catalogo da DSL (RFC1918 + loopback + link-local + CGNAT + ULA).
     """
     raw = os.getenv("GMJFLOW_FLOW_INTERNAL_CIDRS", "")
-    networks = tuple(token.strip() for token in raw.split(",") if token.strip())
-    return networks or detection_dsl.DEFAULT_INTERNAL_NETWORKS
+    override = tuple(token.strip() for token in raw.split(",") if token.strip())
+    if override:
+        return override
+    now = time.monotonic()
+    cached = _FLOW_SEARCH_NETWORKS_CACHE.get("networks")
+    cached_at = float(_FLOW_SEARCH_NETWORKS_CACHE.get("at") or 0.0)
+    if cached and now - cached_at < 60:
+        return cached
+    networks: tuple[str, ...] = ()
+    try:
+        ensure_sensor_db()
+        with sqlite_connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT DISTINCT p.cidr
+                FROM ip_zone_prefixes p
+                JOIN ip_zones z ON z.id = p.zone_id
+                WHERE p.active = 1 AND z.active = 1
+                ORDER BY p.cidr
+                """
+            ).fetchall()
+        networks = tuple(
+            cidr
+            for cidr in (clean_text(row["cidr"]) for row in rows)
+            if cidr
+        )[:FLOW_SEARCH_MAX_INTERNAL_NETWORKS]
+    except Exception as exc:  # pragma: no cover - fallback defensivo
+        logger.warning("Falha ao carregar redes internas das zonas: %s", exc)
+        networks = ()
+    if not networks:
+        return detection_dsl.DEFAULT_INTERNAL_NETWORKS
+    _FLOW_SEARCH_NETWORKS_CACHE["networks"] = networks
+    _FLOW_SEARCH_NETWORKS_CACHE["at"] = now
+    return networks
 
 
 def flow_search_dialect() -> detection_dsl.FlowSearchDialect:

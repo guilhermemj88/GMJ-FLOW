@@ -315,8 +315,11 @@ texto -> parse_expression() -> AST -> validate_expression(section=MATCH) -> comp
 
 - **Nunca** há concatenação de texto do usuário no SQL: todo valor vira parâmetro vinculado.
 - `direction == inbound` → `isIPAddressInRange(dst_ip, <redes internas>)`; `outbound` →
-  `src_ip`; `both` → ambos. As redes internas default são RFC1918 + loopback + link-local +
-  CGNAT (`100.64.0.0/10`) + ULA, sobrescrevíveis por `GMJFLOW_FLOW_INTERNAL_CIDRS`.
+  `src_ip`; `both` → ambos. As redes internas vêm, nesta ordem: `GMJFLOW_FLOW_INTERNAL_CIDRS`
+  (override explícito) → **prefixos ativos de `ip_zones`** (mesma noção de "interno"/cliente
+  que o detector e as zonas usam) → default do catálogo (RFC1918 + loopback + link-local +
+  CGNAT `100.64.0.0/10` + ULA). Em ambientes com prefixos públicos de cliente, o default
+  RFC1918 não representa o cliente — por isso as zonas ativas têm prioridade.
 - `proto == udp` → `proto = {p:UInt8}`; `proto == ip` significa "qualquer protocolo".
 - `tcp_flags contains syn` → `bitAnd(tcp_flags, {p:UInt16}) != 0` (bitmask, mesma semântica
   do detector). **Atenção:** o filtro legado `tcp_flags=syn` é **igualdade exata** — o
