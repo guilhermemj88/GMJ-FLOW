@@ -103,7 +103,8 @@ function FlowRow({ row }) {
 // Mostra apenas os campos com match_allowed = true (seção MATCH do Flow Search).
 function DictionaryDrawer({ onClose, onPick }) {
   const data = useApi('/api/rule-language/catalog');
-  const fields = (data.data?.fields || []).filter((item) => item.match_allowed);
+  // Somente campos MATCH que realmente existem no Flow Search (linhas de flow_raw).
+  const fields = (data.data?.fields || []).filter((item) => item.match_allowed && item.flow_search_allowed !== false);
   const columns = [
     {
       key: 'name',
@@ -129,7 +130,7 @@ function DictionaryDrawer({ onClose, onPick }) {
           <div>
             <Badge tone="info">Dicionário</Badge>
             <h2>Campos do Flow Search</h2>
-            <p>GET /api/rule-language/catalog · somente campos com match_allowed = true · nenhuma lista duplicada no frontend</p>
+            <p>GET /api/rule-language/catalog · match_allowed = true e disponíveis no Flow Search · nenhuma lista duplicada no frontend</p>
           </div>
           <button type="button" onClick={onClose} aria-label="Fechar">×</button>
         </header>
