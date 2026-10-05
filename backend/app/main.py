@@ -53941,4 +53941,12 @@ def rule_language_catalog(request: Request):
     frontend). Nao executa deteccao, nao toca banco e nao altera regras.
     """
     require_authenticated(request)
-    return detection_dsl.catalog_json()
+    payload = detection_dsl.catalog_json()
+    try:
+        availability = detection_dsl.field_flow_search_availability(flow_search_flow_raw_schema())
+    except Exception as exc:  # pragma: no cover - catalogo nao depende do ClickHouse
+        logger.warning("Falha ao avaliar disponibilidade no Flow Search: %s", exc)
+        availability = {}
+    for item in payload.get("fields", []):
+        item["flow_search_allowed"] = availability.get(item["name"], None)
+    return payload

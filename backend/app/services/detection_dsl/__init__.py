@@ -91,6 +91,7 @@ from .compiler import (
     compile_expression,
     compile_match,
     count_conditions,
+    field_flow_search_availability,
     summarize,
 )
 from .parser import parse, parse_and_validate, parse_expression, tokenize
@@ -173,6 +174,7 @@ __all__ = [
     "compile_expression",
     "compile_match",
     "count_conditions",
+    "field_flow_search_availability",
     "format_quantity",
     "is_builder_compatible",
     "iter_conditions",

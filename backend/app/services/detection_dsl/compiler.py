@@ -510,6 +510,29 @@ class _Compiler:
         )
 
 
+def field_flow_search_availability(column_types: Mapping[str, str]) -> dict[str, bool]:
+    """Mapa campo-do-dicionario -> disponivel no Flow Search (linhas de flow_raw).
+
+    Usado pelo endpoint do catalogo para a UI nao oferecer campos que o
+    compilador recusaria (ex.: sensor_id, icmp_type, icmp_code).
+    """
+    availability: dict[str, bool] = {}
+    special = {"direction", "decoder"}
+    for name in catalog.FIELDS:
+        if name in UNAVAILABLE_FIELDS:
+            availability[name] = False
+        elif name in special:
+            availability[name] = True
+        elif name == "interface_if_index":
+            availability[name] = "input_if" in column_types and "output_if" in column_types
+        elif name in FIELD_COLUMNS:
+            column, _ = FIELD_COLUMNS[name]
+            availability[name] = column in column_types
+        else:
+            availability[name] = False
+    return availability
+
+
 def check_limits(text: str) -> None:
     if not str(text or "").strip():
         raise CompileError("EMPTY_EXPRESSION", "expressao vazia")

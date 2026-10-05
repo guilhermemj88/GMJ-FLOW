@@ -306,6 +306,10 @@ Resposta: `valid`, `canonical_expression`, `ast` (resumida), `conditions`, `fiel
 `errors` e `warnings` estruturados. É `GET` de propósito — o preview `:8081` bloqueia
 `POST` genérico.
 
+O `GET /api/rule-language/catalog` também devolve `flow_search_allowed` por campo (calculado
+a partir do schema físico do `flow_raw`), para a UI não oferecer no Dicionário campos que o
+compilador recusaria (ex.: `sensor_id`, `icmp_type`, `icmp_code`, métricas agregadas).
+
 ### 10.2 Como a expressão vira SQL
 
 ```text
@@ -369,20 +373,27 @@ sensor matches "^FIBINET-"
 
 Esses exemplos são **queries de investigação**, não vetores.
 
-### 10.6 Comparação legacy × expressão (dados reais, janela de 60 min)
+### 10.6 Comparação legacy × expressão (dados reais, **mesmo snapshot**, 60 min)
+
+As contagens abaixo saem de **uma única query** (`countIf`), sem desvio de tráfego:
 
 | Consulta | Legacy | Expressão |
 |---|---|---|
-| `proto=udp` + `src_port=53` | 44 061 | 44 061 |
-| `proto=udp` + `src_port=123` | 686 | 686 |
-| `src_ip=100.64.0.0/10` | 61 230 | 61 230 |
-| `sensor=NE8000-BGP-FIBINET` | 3 339 752 | 3 339 752 |
-| `expression(proto==udp)` + `src_port=53` | — | 44 047 (igual à expressão completa) |
-| `tcp_flags=syn` (igualdade) | 69 514 | 109 006 (`contains syn`, bitmask) |
+| `proto=udp` + `src_port=53` | 44 110 | 44 110 |
+| `proto=udp` + `src_port=123` | 684 | 684 |
+| `src_ip=100.64.0.0/10` | 62 133 | 62 133 |
+| `dst_ip=45.163.144.0/22` (prefixo real de zona) | 135 109 | 135 109 |
+| `if_index=90` | 1 068 260 | 1 068 260 |
+| `expression(proto==udp)` + `src_port=53` | — | 44 152 (igual à expressão completa) |
+| `tcp_flags=syn` (igualdade) | 68 183 | 107 829 (`contains syn`, bitmask) |
+
+`direction` (sem equivalente legado) na mesma janela: `inbound` = 3 878 761,
+`outbound` = 3 103 498, `both` = 6 797 575; o exemplo DNS inbound
+(`proto == udp and src_port == 53 and direction == inbound`) = 26 590 linhas.
 
 Validado também que toda linha retornada por `proto == udp and src_port == 53` tem
 `proto=17` e `src_port=53`, e que `direction == inbound/outbound` não devolveu nenhuma
-linha com o lado interno fora das redes configuradas.
+linha com o lado interno fora das redes de zona.
 
 ---
 

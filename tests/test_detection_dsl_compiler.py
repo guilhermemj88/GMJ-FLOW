@@ -21,6 +21,7 @@ from app.services.detection_dsl import (  # noqa: E402
     check_expression,
     compile_expression,
     compile_match,
+    field_flow_search_availability,
     parse_expression,
 )
 
@@ -314,6 +315,21 @@ class FlowSearchWiringStaticTest(unittest.TestCase):
     def test_expression_is_combined_with_legacy_filters(self):
         self.assert_in_main("flow_search_internal_networks")
         self.assert_in_main("GMJFLOW_FLOW_INTERNAL_CIDRS")
+
+
+class FieldAvailabilityTest(unittest.TestCase):
+    def test_available_fields_and_specials(self):
+        availability = field_flow_search_availability(FLOW_RAW_COLUMNS)
+        for name in ("src_ip", "dst_ip", "src_port", "dst_port", "protocol", "tcp_flags", "sensor", "bytes", "direction", "decoder", "interface_if_index"):
+            self.assertTrue(availability[name], name)
+        for name in ("sensor_id", "icmp_type", "icmp_code", "packets_s", "bits_s", "avg_packet_bytes"):
+            self.assertFalse(availability[name], name)
+
+    def test_missing_column_marks_field_unavailable(self):
+        availability = field_flow_search_availability({"src_ip": "IPv6"})
+        self.assertTrue(availability["src_ip"])
+        self.assertFalse(availability["dst_ip"])
+        self.assertFalse(availability["interface_if_index"])
 
 
 if __name__ == "__main__":
