@@ -168,6 +168,9 @@ services:
       AI_ALLOW_AUTO: "${AI_ALLOW_AUTO-false}"
       AI_REQUIRE_POLICY_VALIDATION: "${AI_REQUIRE_POLICY_VALIDATION-true}"
       PMACCT_STATE_DIR: "${PMACCT_STATE_DIR-/var/spool/pmacct/state}"
+      # PERF-C.0: com o worker dedicado (servico `detector`), a API NAO roda o detector.
+      # Override explicito: GMJFLOW_DETECTION_INPROCESS_ENABLED=true volta ao modo antigo.
+      GMJFLOW_DETECTION_INPROCESS_ENABLED: "${GMJFLOW_DETECTION_INPROCESS_ENABLED-false}"
     ports:
       - "${BACKEND_PORT-8000}:8000"
     volumes:
@@ -179,6 +182,58 @@ services:
     depends_on:
       clickhouse:
         condition: service_healthy
+
+  # PERF-C.0 - detector de anomalias isolado do processo da API (mesma imagem,
+  # entrypoint diferente). Garante 1 unico dono via lease em SQLite.
+  detector:
+    image: gmj-flow-backend:latest
+    container_name: gmj-flow-detector
+    restart: unless-stopped
+    command: ["python", "-m", "app.detection_worker"]
+    environment:
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_PORT: 8123
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER-default}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD-}
+      CLICKHOUSE_DATABASE: ${CLICKHOUSE_DATABASE-flowdb}
+      CLICKHOUSE_CONNECT_TIMEOUT_SECONDS: "${CLICKHOUSE_CONNECT_TIMEOUT_SECONDS-5}"
+      CLICKHOUSE_QUERY_TIMEOUT_SECONDS: "${CLICKHOUSE_QUERY_TIMEOUT_SECONDS-30}"
+      CLICKHOUSE_ADMIN_TIMEOUT_SECONDS: "${CLICKHOUSE_ADMIN_TIMEOUT_SECONDS-300}"
+      GMJFLOW_DB_PATH: "${GMJFLOW_DB_PATH-/app/data/gmjflow.db}"
+      GMJFLOW_RUNTIME_DIR: "${GMJFLOW_RUNTIME_DIR-/app/runtime}"
+      GMJFLOW_PROJECT_DIR: "${GMJFLOW_PROJECT_DIR-}"
+      GMJFLOW_DOCKER_NETWORK: "${GMJFLOW_DOCKER_NETWORK-gmj-flow_default}"
+      GMJFLOW_DETECTION_WORKER_ENABLED: "true"
+      GMJFLOW_DETECTION_INPROCESS_ENABLED: "false"
+      GMJFLOW_DETECTION_WORKER_PORT: "${GMJFLOW_DETECTION_WORKER_PORT-8090}"
+      GMJFLOW_DETECTION_LEASE_TTL_SECONDS: "${GMJFLOW_DETECTION_LEASE_TTL_SECONDS-120}"
+      GMJFLOW_DETECTION_RECONCILE_ENABLED: "${GMJFLOW_DETECTION_RECONCILE_ENABLED-false}"
+      GMJFLOW_DETECTION_WATERMARK_SECONDS: "${GMJFLOW_DETECTION_WATERMARK_SECONDS-240}"
+      GMJFLOW_DETECTION_RECONCILE_MAX_BUCKETS: "${GMJFLOW_DETECTION_RECONCILE_MAX_BUCKETS-6}"
+      GMJFLOW_ANOMALY_DETECTION_ENABLED: "${GMJFLOW_ANOMALY_DETECTION_ENABLED-true}"
+      GMJFLOW_ANOMALY_INTERVAL_SECONDS: "${GMJFLOW_ANOMALY_INTERVAL_SECONDS-30}"
+      GMJFLOW_ANOMALY_LOOKBACK_SECONDS: "${GMJFLOW_ANOMALY_LOOKBACK_SECONDS-60}"
+      GMJFLOW_ANOMALY_MIN_DURATION_SECONDS: "${GMJFLOW_ANOMALY_MIN_DURATION_SECONDS-30}"
+      GMJFLOW_ANOMALY_CLOSE_AFTER_SECONDS: "${GMJFLOW_ANOMALY_CLOSE_AFTER_SECONDS-120}"
+      GMJFLOW_ANOMALY_MITIGATION_RETRY_WINDOW_SECONDS: "${GMJFLOW_ANOMALY_MITIGATION_RETRY_WINDOW_SECONDS-900}"
+      GMJFLOW_MAX_RANGE_MINUTES: "${GMJFLOW_MAX_RANGE_MINUTES-259200}"
+      GMJFLOW_AUTH_SECRET: "${GMJFLOW_AUTH_SECRET-gmj-flow-dev-secret-change-me}"
+      GMJFLOW_AI_CREDENTIAL_KEY: "${GMJFLOW_AI_CREDENTIAL_KEY-}"
+      GMJFLOW_SNMP_POLLING_ENABLED: "0"
+    volumes:
+      - ./data/backend:/app/data
+      - ./:/app/runtime
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /run/exabgp:/run/exabgp
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/health', timeout=5)\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 45s
 
   frontend:
     image: nginx:1.27-alpine

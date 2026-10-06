@@ -36287,6 +36287,12 @@ def detection_scheduler_interval_seconds() -> int:
 def update_detection_scheduler_status(**updates: Any) -> None:
     with DETECTION_SCHEDULER_LOCK:
         DETECTION_SCHEDULER_STATUS.update(updates)
+        snapshot = dict(DETECTION_SCHEDULER_STATUS)
+    # Fonte compartilhada (SQLite): a API continua mostrando o status mesmo quando
+    # o detector roda em outro processo/container (PERF-C.0).
+    snapshot["owner"] = detection_worker_identity()
+    snapshot["persisted_at"] = utc_now_iso()
+    persist_detection_status(snapshot)
 
 
 def detection_template_rule_rows(conn: sqlite3.Connection) -> list[dict[str, Any]]:
@@ -37213,6 +37219,203 @@ def detect_anomalies_once() -> dict[str, Any]:
     return {"ok": True, "checked": checked, "triggered": triggered, "closed": closed, "template_detection": template_detection, "mitigation": mitigation, "errors": errors}
 
 
+DETECTION_LEASE_ID = "detector"
+
+
+def detection_inprocess_enabled() -> bool:
+    """A API roda o detector embutido? (PERF-C.0)
+
+    Default `true` (compatibilidade total com o comportamento atual). Com o worker
+    dedicado, o backend recebe `GMJFLOW_DETECTION_INPROCESS_ENABLED=false` para
+    garantir UM UNICO dono do detector.
+    """
+    value = os.getenv("GMJFLOW_DETECTION_INPROCESS_ENABLED")
+    if value is None:
+        return True
+    return clean_text(value).lower() not in {"0", "false", "no", "off"}
+
+
+def detection_worker_enabled() -> bool:
+    """Este processo e o worker dedicado do detector?"""
+    value = os.getenv("GMJFLOW_DETECTION_WORKER_ENABLED", "false")
+    return clean_text(value).lower() in {"1", "true", "yes", "on"}
+
+
+def detection_worker_port() -> int:
+    raw = os.getenv("GMJFLOW_DETECTION_WORKER_PORT", "8090")
+    try:
+        return max(1, min(65535, int(raw)))
+    except (TypeError, ValueError):
+        return 8090
+
+
+def detection_lease_ttl_seconds() -> int:
+    raw = os.getenv("GMJFLOW_DETECTION_LEASE_TTL_SECONDS", "120")
+    try:
+        return max(30, min(3600, int(raw)))
+    except (TypeError, ValueError):
+        return 120
+
+
+def detection_worker_identity() -> str:
+    return f"{socket.gethostname()}:{os.getpid()}"
+
+
+def _detection_ensure_runtime_tables(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS detection_worker_lease (
+            id TEXT PRIMARY KEY,
+            owner TEXT NOT NULL,
+            hostname TEXT NOT NULL,
+            pid INTEGER NOT NULL,
+            acquired_at TEXT NOT NULL,
+            heartbeat_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS detection_runtime_state (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+
+
+def detection_lease_acquire(owner: str, ttl_seconds: int | None = None) -> bool:
+    """Toma (ou renova) o lease do detector. Garante UM unico processo dono.
+
+    Usa BEGIN IMMEDIATE para serializar entre processos (API e worker). O lease
+    expira por TTL, permitindo takeover automatico apos queda do dono.
+    """
+    ttl = max(30, int(ttl_seconds or detection_lease_ttl_seconds()))
+    now = datetime.now(timezone.utc)
+    now_text = iso(now)
+    expires_text = iso(now + timedelta(seconds=ttl))
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        _detection_ensure_runtime_tables(conn)
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT owner, expires_at FROM detection_worker_lease WHERE id = ?",
+            (DETECTION_LEASE_ID,),
+        ).fetchone()
+        if row is None:
+            conn.execute(
+                """
+                INSERT INTO detection_worker_lease(id, owner, hostname, pid, acquired_at, heartbeat_at, expires_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (DETECTION_LEASE_ID, owner, socket.gethostname(), os.getpid(), now_text, now_text, expires_text),
+            )
+            acquired = True
+        elif clean_text(row["owner"]) == owner or (parse_datetime_text(row["expires_at"]) or now) <= now:
+            conn.execute(
+                """
+                UPDATE detection_worker_lease
+                SET owner = ?, hostname = ?, pid = ?, heartbeat_at = ?, expires_at = ?,
+                    acquired_at = CASE WHEN owner = ? THEN acquired_at ELSE ? END
+                WHERE id = ?
+                """,
+                (owner, socket.gethostname(), os.getpid(), now_text, expires_text, owner, now_text, DETECTION_LEASE_ID),
+            )
+            acquired = True
+        else:
+            acquired = False
+        conn.commit()
+    return acquired
+
+
+def detection_lease_renew(owner: str, ttl_seconds: int | None = None) -> bool:
+    ttl = max(30, int(ttl_seconds or detection_lease_ttl_seconds()))
+    now = datetime.now(timezone.utc)
+    ensure_sensor_db()
+    with sqlite_connection() as conn:
+        _detection_ensure_runtime_tables(conn)
+        cursor = conn.execute(
+            """
+            UPDATE detection_worker_lease
+            SET heartbeat_at = ?, expires_at = ?
+            WHERE id = ? AND owner = ?
+            """,
+            (iso(now), iso(now + timedelta(seconds=ttl)), DETECTION_LEASE_ID, owner),
+        )
+        conn.commit()
+        return int(cursor.rowcount or 0) > 0
+
+
+def detection_lease_release(owner: str) -> None:
+    try:
+        ensure_sensor_db()
+        with sqlite_connection() as conn:
+            _detection_ensure_runtime_tables(conn)
+            conn.execute(
+                "DELETE FROM detection_worker_lease WHERE id = ? AND owner = ?",
+                (DETECTION_LEASE_ID, owner),
+            )
+            conn.commit()
+    except Exception as exc:  # pragma: no cover - shutdown defensivo
+        logger.warning("Falha ao liberar lease do detector: %s", exc)
+
+
+def detection_lease_info() -> dict[str, Any] | None:
+    try:
+        ensure_sensor_db()
+        with sqlite_connection() as conn:
+            _detection_ensure_runtime_tables(conn)
+            row = conn.execute(
+                "SELECT * FROM detection_worker_lease WHERE id = ?",
+                (DETECTION_LEASE_ID,),
+            ).fetchone()
+        return dict(row) if row is not None else None
+    except Exception as exc:  # pragma: no cover
+        logger.warning("Falha ao ler lease do detector: %s", exc)
+        return None
+
+
+def persist_detection_status(status: dict[str, Any]) -> None:
+    """Publica o status do detector no SQLite (fonte compartilhada API x worker)."""
+    try:
+        ensure_sensor_db()
+        with sqlite_connection() as conn:
+            _detection_ensure_runtime_tables(conn)
+            conn.execute(
+                """
+                INSERT INTO detection_runtime_state(key, value, updated_at)
+                VALUES ('scheduler_status', ?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+                """,
+                (json.dumps(status, separators=(",", ":"), default=str, sort_keys=True), utc_now_iso()),
+            )
+            conn.commit()
+    except Exception as exc:  # pragma: no cover - telemetria nunca derruba o ciclo
+        logger.warning("Falha ao persistir status do detector: %s", exc)
+
+
+def load_persisted_detection_status() -> dict[str, Any] | None:
+    try:
+        ensure_sensor_db()
+        with sqlite_connection() as conn:
+            _detection_ensure_runtime_tables(conn)
+            row = conn.execute(
+                "SELECT value, updated_at FROM detection_runtime_state WHERE key = 'scheduler_status'"
+            ).fetchone()
+        if row is None:
+            return None
+        payload = json.loads(row["value"])
+        if not isinstance(payload, dict):
+            return None
+        payload["_persisted_at"] = row["updated_at"]
+        return payload
+    except Exception as exc:  # pragma: no cover
+        logger.warning("Falha ao ler status persistido do detector: %s", exc)
+        return None
+
+
 def anomaly_detection_enabled() -> bool:
     value = os.getenv("GMJFLOW_DETECTION_ENABLED")
     if value is None:
@@ -37233,9 +37436,17 @@ def anomaly_detection_loop() -> None:
 def start_anomaly_detection_thread() -> None:
     global ANOMALY_DETECTION_THREAD
     if not anomaly_detection_enabled():
+        logger.info("detector: desabilitado por env (GMJFLOW_*_DETECTION_ENABLED)")
+        return
+    if not detection_inprocess_enabled():
+        logger.info(
+            "detector: API NAO e dona do detector (GMJFLOW_DETECTION_INPROCESS_ENABLED=false); "
+            "o worker dedicado (gmj-flow-detector) deve estar ativo"
+        )
         return
     if ANOMALY_DETECTION_THREAD is not None and ANOMALY_DETECTION_THREAD.is_alive():
         return
+    logger.info("detector: API e a dona (in-process) owner=%s", detection_worker_identity())
     ANOMALY_DETECTION_STOP.clear()
     ANOMALY_DETECTION_THREAD = threading.Thread(
         target=anomaly_detection_loop,
@@ -37248,11 +37459,36 @@ def start_anomaly_detection_thread() -> None:
 @app.get("/api/detection/status")
 def detection_status():
     enabled = anomaly_detection_enabled()
+    local_running = bool(ANOMALY_DETECTION_THREAD is not None and ANOMALY_DETECTION_THREAD.is_alive())
     with DETECTION_SCHEDULER_LOCK:
         status = dict(DETECTION_SCHEDULER_STATUS)
+    # Fonte compartilhada: se o detector roda em outro processo (worker dedicado),
+    # o status vem do SQLite — a API nunca depende da memoria do outro processo.
+    status_source = "inprocess" if local_running else "none"
+    status_persisted_at = ""
+    if not local_running:
+        persisted = load_persisted_detection_status()
+        if persisted:
+            status_persisted_at = clean_text(persisted.pop("_persisted_at", ""))
+            status = persisted
+            status_source = "worker"
+    lease = detection_lease_info()
+    now_utc = datetime.now(timezone.utc)
+    lease_expires = parse_datetime_text((lease or {}).get("expires_at")) if lease else None
+    lease_alive = bool(lease_expires and lease_expires > now_utc)
+    status_age = 0
+    persisted_parsed = parse_datetime_text(status_persisted_at)
+    if persisted_parsed is not None:
+        status_age = max(0, int((now_utc - persisted_parsed).total_seconds()))
     return {
         "enabled": enabled,
-        "scheduler_running": bool(ANOMALY_DETECTION_THREAD is not None and ANOMALY_DETECTION_THREAD.is_alive()),
+        "scheduler_running": bool(local_running or lease_alive),
+        "inprocess_enabled": detection_inprocess_enabled(),
+        "worker_enabled_here": detection_worker_enabled(),
+        "status_source": status_source,
+        "status_age_seconds": status_age,
+        "owner": clean_text(status.get("owner")) or (clean_text((lease or {}).get("owner")) if lease else ""),
+        "worker_lease": lease,
         "interval_seconds": detection_scheduler_interval_seconds(),
         "last_run_at": status.get("last_run_at") or "",
         "last_success_at": status.get("last_success_at") or "",
@@ -37275,6 +37511,17 @@ def detection_status():
 
 @app.post("/api/detection/run-now")
 def detection_run_now():
+    # Protecao contra execucao dupla: se outro processo (worker dedicado) detem o
+    # lease ativo, esta API nao deveria rodar o detector manualmente.
+    lease = detection_lease_info()
+    if lease:
+        lease_owner = clean_text(lease.get("owner"))
+        lease_expires = parse_datetime_text(lease.get("expires_at"))
+        if lease_owner and lease_owner != detection_worker_identity() and lease_expires and lease_expires > datetime.now(timezone.utc):
+            raise HTTPException(
+                status_code=409,
+                detail=f"Detector pertence a outro processo ({lease_owner}); use o worker dedicado.",
+            )
     result = run_detection_template_rules_once(create_anomalies=True)
     return {
         "ok": True,
