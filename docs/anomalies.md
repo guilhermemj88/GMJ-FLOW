@@ -291,3 +291,15 @@ ataque/target na faixa extrema (≥80 Mbps ou ≥20 kpps) — 2 eventos hoje (A+
 novo. Tabela de casos, decisão de gate e opções de consolidação em
 [docs/detection-inbound-vectors-2026-10-06.md](detection-inbound-vectors-2026-10-06.md),
 seções 9.4 e 9.5. Repro: `scripts/audit_inbound_dedupe.py`.
+
+## Correlação / reincidência por sujeito (core, 2026-10-06)
+
+A partir desta fase, cada anomalia carrega `correlation` nas APIs de listagem e detalhe:
+sujeito canônico (`ip`/`prefix`/`cgnat_subscriber`/`cgnat_private_ip`), reincidência no dia
+operacional (America/Sao_Paulo), número da ocorrência, lista das ocorrências anteriores e
+`last_previous_occurrence_at`. O histórico de ocorrências fica em `anomaly_occurrences`
+(backfill idempotente do passado; divisão por gap/encerramento nos ciclos novos).
+
+Conceitos (continuação × reincidência), identidade CGNAT com fallback, payload completo da
+API, performance e limitações: [docs/anomaly-correlation.md](anomaly-correlation.md). A UI e
+o webhook/n8n ainda **não** consomem o campo (fase seguinte; sem recálculo no webhook).
