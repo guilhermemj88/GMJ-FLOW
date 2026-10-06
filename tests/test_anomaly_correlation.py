@@ -690,5 +690,53 @@ class CorrelationSummaryTest(AnomalyCorrelationTestBase):
         self.assertFalse(item["correlation"]["is_recurrence"])
 
 
+    def test_upsert_detection_template_dns_anomaly_event_records_occurrence(self):
+        candidate = {
+            "vector": "DNS_SINGLE_FLOW_OUTBOUND",
+            "rule_name": "DNS_SINGLE_FLOW_OUTBOUND",
+            "severity": "critical",
+            "zone_id": 7,
+            "zone_name": "Zona 7",
+            "template_id": 2,
+            "rule_id": 18,
+            "first_seen": _iso(12, 0),
+            "last_seen": _iso(12, 1),
+            "top_src_ip": "45.168.203.126",
+            "top_src_port": 53075,
+            "top_dst_ip": "45.163.144.18",
+            "top_dst_port": 53,
+            "metric": "packets_s",
+            "metric_value": 6000.0,
+            "packets_s": 6000.0,
+            "flows": 1,
+            "rule_config": {},
+        }
+        with main.sqlite_connection() as conn:
+            action = main.upsert_detection_template_dns_anomaly_event(conn, candidate)
+            conn.commit()
+        self.assertEqual(action, "created")
+        with main.sqlite_connection() as conn:
+            row = conn.execute("SELECT id FROM anomaly_events ORDER BY id DESC LIMIT 1").fetchone()
+            occurrences = conn.execute(
+                "SELECT * FROM anomaly_occurrences WHERE anomaly_table = 'anomaly_events' AND anomaly_id = ?",
+                (int(row["id"]),),
+            ).fetchall()
+        self.assertEqual(len(occurrences), 1)
+        self.assertEqual(occurrences[0]["vector_key"], "DNS_SINGLE_FLOW_OUTBOUND")
+        self.assertEqual(occurrences[0]["subject_key"], "45.168.203.126")
+        # segundo match dentro do gap => continuacao
+        candidate_2 = dict(candidate, last_seen=_iso(12, 3))
+        with main.sqlite_connection() as conn:
+            action_2 = main.upsert_detection_template_dns_anomaly_event(conn, candidate_2)
+            conn.commit()
+        self.assertEqual(action_2, "updated")
+        with main.sqlite_connection() as conn:
+            count = conn.execute(
+                "SELECT COUNT(*) FROM anomaly_occurrences WHERE anomaly_table = 'anomaly_events' AND anomaly_id = ?",
+                (int(row["id"]),),
+            ).fetchone()[0]
+        self.assertEqual(count, 1)
+
+
 if __name__ == "__main__":
     unittest.main()
