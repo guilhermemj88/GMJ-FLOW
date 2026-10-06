@@ -128,6 +128,22 @@ ciclo de ~163 s para ~44 s (ClickHouse: 147 s -> 28 s) sem alterar nenhum result
 Detalhes, medicao completa, prova de equivalencia, cursor/watermark (PERF-B) e paralelismo
 (PERF-C) estao em `docs/detection-performance.md`.
 
+### Estabilidade temporal (PERF-A.1 / PERF-B)
+
+- **PERF-A.1 (deployado):** o `ORDER BY metric_value DESC LIMIT 1000` passou a ter tiebreaker
+  pela chave do `GROUP BY`. Sem isso, empates escolhiam grupos diferentes a cada execucao
+  (136 linhas divergentes em duas execucoes do mesmo codigo). Com o tiebreaker, 3 execucoes
+  na mesma janela retornaram resultado identico (md5 igual) — sem flapping.
+- **PERF-B (implementado, nao deployado):** cursor persistido por `(template, window_seconds)`
+  em `detection_cursor`, avancando somente sobre buckets FECHADOS e somente apos sucesso,
+  com watermark (`GMJFLOW_DETECTION_WATERMARK_SECONDS`, default 240 s). O passe rapido
+  (janela recente) continua igual; a reconciliacao reavalia os buckets fechados e consolida o
+  MESMO evento (a `dedupe_key` nao inclui bucket/tempo). Kill switch:
+  `GMJFLOW_DETECTION_RECONCILE_ENABLED=false`.
+- **Semantica de tempo:** `flow_time` e o INICIO do flow (`flow_start`); `flow_end` e
+  `duration_ms` sao sempre nulos. Por isso o FAST e a reconciliacao usam `flow_time`
+  (mesmo bucket) e `received_at` fica apenas como metrica de lag de ingestao.
+
 ## Teste de vetor
 
 Na tela **Vetores de Ataque**, cada linha possui o botao **Testar agora**. O botao executa imediatamente o vetor nos ultimos 60 segundos e abre um modal com:
