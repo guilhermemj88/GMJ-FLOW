@@ -1,6 +1,9 @@
 # GMJ-FLOW — Linguagem de Regras (DSL) e Flow Search
 
 > **Status:** Fases 1 e 2 entregues (catálogo/dicionário + Flow Search por expressão) · **Criado:** 2026-10-05
+> **Fase 4 (2026-10-06):** o detector passou a **avaliar TRIGGER** (WARNING/CRITICAL) para novas regras
+> inbound/download — expressões booleanas canonicalizadas nesta DSL e resolvidas em Python sobre o frame
+> do scan; `avg_packet_bytes` liberado em TRIGGER. Ver `docs/detection-inbound-vectors-2026-10-06.md`.
 > **Fonte de verdade do código:** `backend/app/services/detection_dsl/` (pacote puro, apenas stdlib).
 > **Fonte de verdade do dicionário:** `backend/app/services/detection_dsl/catalog.py`.
 > **Endpoint de leitura:** `GET /api/rule-language/catalog`.
@@ -137,7 +140,12 @@ Cada campo do catálogo declara `name`, `aliases`, `label`, `description`, `type
 ### 5.2 TRIGGER — métricas agregadas
 
 `pps` (`packets_s`), `bps` (`bits_s`), `flows` (`flows_s`), `unique_src_ips`,
-`unique_dst_ips`, `unique_src_ports`, `unique_dst_ports`.
+`unique_dst_ips`, `unique_src_ports`, `unique_dst_ports`, `avg_packet_bytes`
+(derivado `sum(bytes)/sum(packets)`; aceito em TRIGGER desde a Fase 4).
+
+> **Fase 4:** o detector avalia WARNING/CRITICAL como expressões booleanas (OR/AND/NOT)
+> sobre o frame multi-métrica do scan; a expressão é canonicalizada no save e **nunca**
+> vira SQL — ver `docs/detection-inbound-vectors-2026-10-06.md`.
 
 ### 5.3 EVIDENCE
 

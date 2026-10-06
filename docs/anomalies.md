@@ -176,6 +176,30 @@ via `system.query_log`), cursor persistido avancando 60 s por bucket, **sem dupl
 anomalias (68 no total, 1 ativo) e cobertura do watermark de **99,485% com 240 s** (vs 99,704%
 com 300 s) — recomendacao: manter 240 s.
 
+### Fase 4 — vetores inbound/download (2026-10-06)
+
+O motor de `detection_template_rules` ganhou, de forma **aditiva**, a capacidade de avaliar
+vetores inbound/download com triggers booleanos: `trigger_warning_expr`/`trigger_critical_expr`
+(expressoes DSL WARNING/CRITICAL canonicalizadas no save e avaliadas em Python sobre o frame
+multi-metrica do scan), `unique_src_ips` no frame/coluna, `avg_packet_bytes` derivado
+(`sum(bytes)/sum(packets)`, tambem aceito em TRIGGER) e protocolos TCP com flags exatas
+(SYN-NO-ACK, SYN+ACK, ACK-NO-SYN, RST, NULL). As 2 regras DNS inbound produtivas
+(`DNS_AMP_INBOUND_HIGH_BITS`/`PPS`) **nao foram alteradas** e as 28 regras atuais seguem no
+caminho legado (mesma semantica).
+
+Foi adicionado o catalogo de presets `backend/app/services/inbound_vectors.py` (11 vetores:
+DNS/NTP/SSDP/CLDAP reflection, DNS query flood, Memcached, UDP/SYN/SYN-ACK/ACK/ICMP floods)
+com modos single-target (`GROUP BY dst_ip`) e multi-target/carpet bombing (`domain=subnet` +
+`unique_dst_ips >= 8/16`). **Nenhum preset foi ativado**: os payloads saem `enabled=false` e
+a ativacao exige decisao explicita do operador.
+
+Replay historico read-only (mesmo caminho do detector, `scripts/replay_inbound_vectors.py`):
+3.625 scans reais (~0,12–0,26 s cada) em 15 prefixos, janelas 30/60 s, incluindo a janela de
+anomalia UDP de 2026-10-03 19:45Z — **zero matches** nos limiares default (traffico inbound
+observado muito abaixo; folga grande) e prova end-to-end de disparo com limiar trivial
+(`bps >= 0` → matches; `critical` no alvo acima de 1 kbps). Matriz de capacidade, presets,
+thresholds, replay e plano de ativacao: `docs/detection-inbound-vectors-2026-10-06.md`.
+
 ## Teste de vetor
 
 Na tela **Vetores de Ataque**, cada linha possui o botao **Testar agora**. O botao executa imediatamente o vetor nos ultimos 60 segundos e abre um modal com:
