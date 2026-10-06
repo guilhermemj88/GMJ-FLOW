@@ -1,0 +1,8 @@
+FROM gmj-flow-backend:latest
+RUN pip install --no-cache-dir scipy==1.15.3 pytest==8.3.5 httpx==0.28.1 ruff==0.11.13
+WORKDIR /work
+ENV PYTHONPATH=/work/backend
+ENV GMJFLOW_DB_PATH=/work/.dev-data/gmjflow.db
+ENV GMJFLOW_STATISTICS_DB_PATH=/work/.dev-data/traffic-statistics.db
+ENV CLICKHOUSE_HOST=clickhouse
+ENTRYPOINT ["python"]

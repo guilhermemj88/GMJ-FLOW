@@ -8720,6 +8720,35 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
             </div>
           </div>
 
+          <details class="panel p-3 mb-3" id="trafficStatisticsPanel">
+            <summary class="panel-title">ANÁLISE ESTATÍSTICA <span class="badge-soft">Somente análise</span></summary>
+            <p class="subtle mt-2">Diversidade, mudança de distribuição e conformidade. Uma anomalia estatística não determina um ataque e não executa ações.</p>
+            <form id="statisticsForm" class="d-flex flex-wrap gap-2 align-items-end">
+              <label>Escopo<select id="statisticsScope" class="form-select form-select-sm"><option value="target">IP alvo</option><option value="interface">Interface</option><option value="global">Global</option></select></label>
+              <label>IP / índice da interface<input id="statisticsId" class="form-control form-control-sm" placeholder="Ex.: 192.0.2.1" required maxlength="128"></label>
+              <label>Sensor<input id="statisticsSensor" class="form-control form-control-sm" placeholder="Obrigatório para interface" maxlength="128"></label>
+              <label>Exporter<input id="statisticsExporter" class="form-control form-control-sm" placeholder="IP do roteador" maxlength="64"></label>
+              <label>Direção<select id="statisticsDirection" class="form-select form-select-sm"><option value="both">Ambas</option><option value="input">Entrada</option><option value="output">Saída</option></select></label>
+              <label>Janela<select id="statisticsWindow" class="form-select form-select-sm"><option value="1m">1 minuto</option><option value="5m" selected>5 minutos</option><option value="15m">15 minutos</option><option value="1h">1 hora</option></select></label>
+              <button class="btn btn-sm btn-success" type="submit">Analisar</button>
+            </form>
+            <div id="statisticsStatus" class="subtle mt-2" role="status" aria-live="polite">Selecione um escopo. Atualização a cada minuto enquanto este painel estiver aberto.</div>
+            <div id="statisticsResults" hidden>
+              <div class="d-flex flex-wrap gap-3 mt-3"><span id="statisticsOverall" class="badge-soft"></span><span id="statisticsBaseline" class="subtle"></span></div>
+              <h3 class="panel-title mt-3">Entropia Shannon — peso por pacotes</h3>
+              <p class="subtle">Distribuição descreve diversidade. Anomalia compara o histórico. “—” indica dado indisponível; zero é um resultado válido.</p>
+              <div class="table-responsive"><table class="table table-sm"><thead><tr><th>Campo</th><th>Atual (0–1)</th><th>Baseline</th><th>Delta</th><th>z robusto</th><th>Distribuição</th><th>Anomalia</th></tr></thead><tbody id="statisticsEntropy"></tbody></table></div>
+              <div class="d-flex flex-wrap gap-2 align-items-center"><h3 class="panel-title">Histórico Shannon (24h)</h3><label>Campo<select id="statisticsField" class="form-select form-select-sm"></select></label></div>
+              <div id="statisticsChart" style="height:260px" role="img" aria-label="Histórico de entropia normalizada e baseline"></div><div id="statisticsHistoryStatus" class="subtle" role="status"></div>
+              <h3 class="panel-title mt-3" title="D mede quanto a distribuição atual difere do baseline. Quanto mais próximo de 1, maior a mudança.">Kolmogorov–Smirnov ⓘ</h3>
+              <p class="subtle">D é a medida principal. O p-value é complementar e aproximado para valores discretos ou repetidos.</p>
+              <div class="table-responsive"><table class="table table-sm"><thead><tr><th>Métrica</th><th>D</th><th>p-value</th><th>Amostras atual / baseline</th><th>Mudança</th></tr></thead><tbody id="statisticsKs"></tbody></table></div>
+              <h3 class="panel-title mt-3">Conformidade com Lei de Benford</h3>
+              <p class="subtle">Aplicabilidade exige ≥ 1.000 observações positivas e amplitude ≥ 2 ordens de magnitude. Divergência pode refletir características legítimas do tráfego.</p>
+              <div id="statisticsBenford" class="statistics-benford-grid"></div>
+            </div>
+          </details>
+
           <section class="panel p-3 mb-3" id="securityOverviewPanel">
             <div class="d-flex justify-content-between align-items-center gap-2 mb-2">
               <div><div class="panel-title">Security Overview</div><div id="secOverviewStatus" class="subtle" role="status">Carregando resumo...</div></div>

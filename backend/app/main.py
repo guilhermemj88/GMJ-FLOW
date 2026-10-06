@@ -47,6 +47,7 @@ from app.api.mitigation import router as mitigation_router
 from app.api.peak_hunter import router as peak_hunter_router
 from app.api.rtbh import router as rtbh_router
 from app.api.threat_intelligence import router as threat_intelligence_router
+from app.api.traffic_statistics import router as traffic_statistics_router
 from app.api.threat_engine import api_security_router, router as threat_engine_router, security_router
 from app.services.humanize import format_bits_per_second, format_bytes, format_flows, format_packets, format_packets_per_second, format_pdf_metric
 from app.services.clickhouse import fetch_learning_traffic_series
@@ -376,6 +377,7 @@ app.add_middleware(
 app.include_router(mitigation_router)
 app.include_router(peak_hunter_router)
 app.include_router(rtbh_router)
+app.include_router(traffic_statistics_router)
 app.include_router(threat_intelligence_router)
 app.include_router(threat_engine_router)
 app.include_router(security_router)

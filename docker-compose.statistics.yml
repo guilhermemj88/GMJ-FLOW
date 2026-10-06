@@ -1,0 +1,29 @@
+# Optional analytics-only worker. Activate only with explicit deployment approval.
+# Set GMJFLOW_STATISTICS_SCOPES to a JSON array of 1..8 Scope objects first.
+# Example: [{"type":"target","id":"192.0.2.1","sensor":"router-name"}]
+services:
+  backend:
+    environment:
+      GMJFLOW_STATISTICS_DB_PATH: /app/data/traffic-statistics/statistics.db
+
+  statistics:
+    profiles: [statistics]
+    build:
+      context: ./backend
+    command: [python, -m, app.services.traffic_statistics_worker]
+    restart: unless-stopped
+    cpus: 1.0
+    mem_limit: 512m
+    environment:
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_PORT: 8123
+      CLICKHOUSE_DATABASE: ${CLICKHOUSE_DATABASE-flowdb}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER-default}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD-}
+      GMJFLOW_STATISTICS_DB_PATH: /app/data/statistics.db
+      GMJFLOW_STATISTICS_SCOPES: ${GMJFLOW_STATISTICS_SCOPES-[]}
+    volumes:
+      - ./data/backend/traffic-statistics:/app/data
+    depends_on:
+      clickhouse:
+        condition: service_healthy
