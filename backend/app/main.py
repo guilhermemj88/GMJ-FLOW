@@ -33204,7 +33204,9 @@ def list_security_anomalies(
             """,
             [*statuses, *values, limit],
         ).fetchall()
-    return {"items": [security_anomaly_row_to_dict(row) for row in rows]}
+        items = [security_anomaly_row_to_dict(row) for row in rows]
+        anomaly_correlation.attach_correlation_to_anomaly_items(conn, items, table="security_anomalies")
+    return {"items": items}
 
 
 @app.post("/api/security/anomalies/{anomaly_id}/ack")
@@ -39155,6 +39157,8 @@ def anomaly_page(
     ordered = order_anomaly_items(items, sort_by, sort_dir)
     total = int(total_row["count"] or 0) + len(consolidated)
     page_items = enrich_anomalies_with_responses(ordered[offset : offset + page_size])
+    with sqlite_connection() as conn:
+        anomaly_correlation.attach_correlation_to_anomaly_items(conn, page_items)
     return {
         "items": page_items,
         "page": page,
@@ -39824,6 +39828,18 @@ def consolidated_security_anomaly_detail_payload(group: dict[str, Any]) -> dict[
         enriched_conversations = conversations_from_flow_evidence(enrichment.get("flow_evidence"))
         if enriched_conversations:
             conversations = enriched_conversations
+    with sqlite_connection() as correlation_conn:
+        anomaly_correlation.attach_correlation_to_anomaly_items(correlation_conn, details, table="security_anomalies")
+        correlation = next((item.get("correlation") for item in details if item.get("correlation")), None)
+        if correlation is None:
+            correlation = anomaly_correlation.resolve_anomaly_correlation(
+                correlation_conn,
+                "security_anomalies",
+                int(event.get("security_anomaly_id") or event.get("id") or 0),
+                anomaly=event,
+            )
+        if correlation is not None:
+            event = {**event, "correlation": correlation}
     return anomaly_detail_payload(
         event,
         flows,
@@ -39854,7 +39870,10 @@ def anomaly_detail(request: Request, event_id: int):
     with sqlite_connection() as conn:
         security_item = None if regular_exists else resolve_security_anomaly_identifier(conn, event_id, raise_not_found=False)
         if security_item is not None:
+            anomaly_correlation.attach_correlation_to_anomaly_items(conn, [security_item], table="security_anomalies")
             event = security_anomaly_event_from_items([security_item], preferred_id=int(security_item["id"]))
+            if security_item.get("correlation") is not None:
+                event["correlation"] = security_item["correlation"]
             conversations = {}
             key = f"{security_item.get('src_ip') or '-'} -> {security_item.get('dst_ip') or '-'} {security_item.get('protocol') or 'ALL'}"
             conversations[key] = {
@@ -39908,6 +39927,11 @@ def anomaly_detail(request: Request, event_id: int):
                 return anomaly_detail(request, legacy_consolidated_security_anomaly_id(group["key"]))
             raise HTTPException(status_code=404, detail="Anomalia nao encontrada")
         event = anomaly_event_row_to_dict(row)
+        event_correlation = anomaly_correlation.resolve_anomaly_correlation(
+            conn, "anomaly_events", int(event.get("id") or 0), anomaly=event
+        )
+        if event_correlation is not None:
+            event["correlation"] = event_correlation
         vector = None
         if event.get("attack_vector_id") is not None:
             vector_row = conn.execute(

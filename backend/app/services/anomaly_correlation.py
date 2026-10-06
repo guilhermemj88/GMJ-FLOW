@@ -617,6 +617,225 @@ def mark_occurrences_ended(
 
 
 # ---------------------------------------------------------------------------
+# Correlacao (leitura / API)
+# ---------------------------------------------------------------------------
+
+
+def _occurrence_to_previous_dict(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "occurrence_id": int(row["id"]),
+        "anomaly_id": int(row["anomaly_id"]),
+        "anomaly_table": _clean(row["anomaly_table"]),
+        "first_seen": _clean(row["first_seen"]),
+        "last_seen": _clean(row["last_seen"]),
+        "ended_at": _clean(row["ended_at"]) or None,
+        "severity": _clean(row["severity"]),
+        "metric": _clean(row["metric"]),
+        "metric_value": _float_or_none(row["metric_peak"]),
+    }
+
+
+def _correlation_payload(
+    conn: sqlite3.Connection,
+    *,
+    vector_key: str,
+    subject_type: str,
+    subject_key: str,
+    subject_confidence: str,
+    subject_context: Mapping[str, Any] | None,
+    day: str,
+    exclude_id: int | None = None,
+    details_limit: int = DEFAULT_DETAILS_LIMIT,
+) -> dict[str, Any]:
+    clauses = ["vector_key = ?", "subject_key = ?", "operational_day = ?"]
+    params: list[Any] = [vector_key, subject_key, day]
+    if exclude_id is not None:
+        clauses.append("id <> ?")
+        params.append(int(exclude_id))
+    where = " AND ".join(clauses)
+    previous_count = int(
+        conn.execute(f"SELECT COUNT(*) AS count FROM anomaly_occurrences WHERE {where}", params).fetchone()["count"] or 0
+    )
+    limit = max(0, int(details_limit))
+    previous: list[dict[str, Any]] = []
+    if limit > 0 and previous_count > 0:
+        rows = conn.execute(
+            f"""
+            SELECT *
+            FROM anomaly_occurrences
+            WHERE {where}
+            ORDER BY first_seen DESC, id DESC
+            LIMIT ?
+            """,
+            [*params, limit],
+        ).fetchall()
+        previous = [_occurrence_to_previous_dict(row) for row in rows]
+    return {
+        "subject_type": subject_type,
+        "subject_key": subject_key,
+        "subject_confidence": subject_confidence or "low",
+        "subject_context": dict(subject_context or {}),
+        "is_recurrence": previous_count > 0,
+        "occurrence_number_today": previous_count + 1,
+        "occurrences_today": previous_count + 1,
+        "previous_occurrences_today": previous_count,
+        "last_previous_occurrence_at": previous[0]["first_seen"] if previous else "",
+        "previous_occurrences": previous,
+        "previous_occurrences_truncated": previous_count > len(previous),
+        "operational_day": day,
+        "timezone": OPERATIONAL_TIME_ZONE_NAME,
+        "schema_version": ANOMALY_OCCURRENCES_SCHEMA_VERSION,
+    }
+
+
+def _subject_context_from_json(value: Any) -> dict[str, Any]:
+    try:
+        parsed = json.loads(_clean(value) or "{}")
+    except ValueError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _correlation_from_occurrence_row(
+    conn: sqlite3.Connection,
+    occurrence: sqlite3.Row,
+    *,
+    details_limit: int = DEFAULT_DETAILS_LIMIT,
+) -> dict[str, Any]:
+    return _correlation_payload(
+        conn,
+        vector_key=_clean(occurrence["vector_key"]),
+        subject_type=_clean(occurrence["subject_type"]),
+        subject_key=_clean(occurrence["subject_key"]),
+        subject_confidence=_clean(occurrence["subject_confidence"]),
+        subject_context=_subject_context_from_json(occurrence["subject_context_json"]),
+        day=_clean(occurrence["operational_day"]),
+        exclude_id=int(occurrence["id"]),
+        details_limit=details_limit,
+    )
+
+
+def resolve_anomaly_correlation(
+    conn: sqlite3.Connection,
+    anomaly_table: str,
+    anomaly_id: int | None,
+    *,
+    details_limit: int = DEFAULT_DETAILS_LIMIT,
+    anomaly: Mapping[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Summary canonico de correlacao de uma anomalia (por row).
+
+    Usa a ocorrencia persistida mais recente da row; se ainda nao existir
+    (janela entre a criacao da anomalia e o proximo hook), calcula o sujeito
+    em memoria sem persistir. ``anomaly`` e o dict da anomalia (row_to_dict)
+    usado nesse fallback.
+    """
+    parsed_id = _int_or_none(anomaly_id)
+    if parsed_id is None or parsed_id <= 0 or not anomaly_table:
+        return None
+    ensure_anomaly_correlation_schema(conn)
+    occurrence = _latest_occurrence(conn, anomaly_table, parsed_id)
+    if occurrence is not None:
+        return _correlation_from_occurrence_row(conn, occurrence, details_limit=details_limit)
+    if anomaly is None:
+        return None
+    vector_key = anomaly_vector_key(anomaly, anomaly_table)
+    if not vector_key:
+        return None
+    subject = resolve_subject_for_anomaly(conn, anomaly, table=anomaly_table)
+    start_text = _clean(
+        anomaly.get("first_seen")
+        or anomaly.get("started_at")
+        or anomaly.get("last_seen")
+        or anomaly.get("last_seen_at")
+        or anomaly.get("created_at")
+    )
+    day = operational_day(start_text)
+    if not day:
+        return None
+    return _correlation_payload(
+        conn,
+        vector_key=vector_key,
+        subject_type=subject["subject_type"],
+        subject_key=subject["subject_key"],
+        subject_confidence=subject["subject_confidence"],
+        subject_context=subject["subject_context"],
+        day=day,
+        exclude_id=None,
+        details_limit=details_limit,
+    )
+
+
+def _security_ids_from_item(item: Mapping[str, Any]) -> list[int]:
+    ids: list[int] = []
+    for value in item.get("security_anomaly_ids") or []:
+        parsed = _int_or_none(value)
+        if parsed is not None and parsed > 0:
+            ids.append(parsed)
+    return ids
+
+
+def attach_correlation_to_anomaly_items(
+    conn: sqlite3.Connection,
+    items: list[dict[str, Any]] | None,
+    *,
+    table: str | None = None,
+    details_limit: int = DEFAULT_DETAILS_LIMIT,
+) -> list[dict[str, Any]] | None:
+    """Anexa ``correlation`` a cada item de anomalia (lista/backward-compatible).
+
+    ``table`` explicita a origem dos itens (``security_anomalies`` ou
+    ``anomaly_events``); sem ela, itens consolidados de ``security_anomalies``
+    (API de eventos) usam a ocorrencia mais recente do grupo e os demais sao
+    tratados como ``anomaly_events``. Falhas por item sao logadas e nao
+    derrubam a resposta.
+    """
+    if not items:
+        return items
+    for item in items:
+        if not isinstance(item, dict) or item.get("correlation") is not None:
+            continue
+        try:
+            if table is None and _clean(item.get("source")).lower() == "security_anomalies":
+                ids = _security_ids_from_item(item)
+                if ids:
+                    placeholders = ",".join("?" for _ in ids)
+                    occurrence = conn.execute(
+                        f"""
+                        SELECT *
+                        FROM anomaly_occurrences
+                        WHERE anomaly_table = 'security_anomalies' AND anomaly_id IN ({placeholders})
+                        ORDER BY last_seen DESC, id DESC
+                        LIMIT 1
+                        """,
+                        ids,
+                    ).fetchone()
+                    if occurrence is not None:
+                        item["correlation"] = _correlation_from_occurrence_row(conn, occurrence, details_limit=details_limit)
+                        continue
+                correlation = resolve_anomaly_correlation(
+                    conn,
+                    "security_anomalies",
+                    _int_or_none(item.get("id")),
+                    anomaly=item,
+                    details_limit=details_limit,
+                )
+            else:
+                correlation = resolve_anomaly_correlation(
+                    conn,
+                    table or "anomaly_events",
+                    _int_or_none(item.get("id")),
+                    anomaly=item,
+                    details_limit=details_limit,
+                )
+            if correlation is not None:
+                item["correlation"] = correlation
+        except Exception:
+            logger.exception("Falha ao anexar correlation a item de anomalia id=%s", item.get("id"))
+    return items
+
+
+# ---------------------------------------------------------------------------
 # Backfill one-time (historico existente = 1 ocorrencia por row)
 # ---------------------------------------------------------------------------
 
