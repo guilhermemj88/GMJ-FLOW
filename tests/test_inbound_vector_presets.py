@@ -87,8 +87,14 @@ class PresetCatalogTest(unittest.TestCase):
 
     def test_dns_reflection_defaults_match_plan(self):
         preset = inbound_vectors.get_preset("dns_reflection")
-        self.assertEqual(preset.warning_expr, "bps >= 15M OR pps >= 3k")
-        self.assertEqual(preset.critical_expr, "bps >= 30M OR pps >= 8k")
+        self.assertEqual(
+            preset.warning_expr,
+            "(bps >= 15M OR pps >= 3k) AND NOT (bps > 80M OR pps > 20k)",
+        )
+        self.assertEqual(
+            preset.critical_expr,
+            "(bps >= 30M OR pps >= 8k) AND NOT (bps > 80M OR pps > 20k)",
+        )
         self.assertEqual(preset.warning_multi_expr, "(bps >= 50M OR pps >= 10k) AND unique_dst_ips >= 8")
         self.assertEqual(preset.critical_multi_expr, "(bps >= 100M OR pps >= 20k) AND unique_dst_ips >= 16")
 
@@ -121,6 +127,122 @@ class PresetCatalogTest(unittest.TestCase):
         preset = inbound_vectors.get_preset("dns_query_flood")
         with self.assertRaises(ValueError):
             inbound_vectors.preset_rule_payload(preset, multi=True)
+
+
+def legacy_dns_amp_severities(bps: float, pps: float) -> tuple[str, ...]:
+    """Faixas reais das 2 regras legadas DNS_AMP_INBOUND (comparison=over => estritamente maior)."""
+    severities: list[str] = []
+    if bps > 80_000_000.0:
+        severities.append("BITS-warning")
+    if bps > 100_000_000.0:
+        severities.append("BITS-critical")
+    if pps > 20_000.0:
+        severities.append("PPS-warning")
+    if pps > 40_000.0:
+        severities.append("PPS-critical")
+    return tuple(severities)
+
+
+DNS_BAND_SPLIT_BOUNDARY_CASES = (
+    # caso, bps, pps, severidade esperada do preset band-split, legados esperados
+    ("10 Mbps / 1 kpps", 10_000_000.0, 1_000.0, None, ()),
+    ("15 Mbps / 3 kpps", 15_000_000.0, 3_000.0, "warning", ()),
+    ("20 Mbps / 4 kpps", 20_000_000.0, 4_000.0, "warning", ()),
+    ("29 Mbps / 7 kpps", 29_000_000.0, 7_000.0, "warning", ()),
+    ("30 Mbps / 8 kpps", 30_000_000.0, 8_000.0, "critical", ()),
+    ("50 Mbps / 10 kpps", 50_000_000.0, 10_000.0, "critical", ()),
+    ("79 Mbps / 19 kpps", 79_000_000.0, 19_000.0, "critical", ()),
+    ("85 Mbps / 5 kpps", 85_000_000.0, 5_000.0, None, ("BITS-warning",)),
+    ("50 Mbps / 25 kpps", 50_000_000.0, 25_000.0, None, ("PPS-warning",)),
+    ("85 Mbps / 25 kpps", 85_000_000.0, 25_000.0, None, ("BITS-warning", "PPS-warning")),
+    (
+        "120 Mbps / 50 kpps",
+        120_000_000.0,
+        50_000.0,
+        None,
+        ("BITS-warning", "BITS-critical", "PPS-warning", "PPS-critical"),
+    ),
+    ("exato 80 Mbps / 1 kpps", 80_000_000.0, 1_000.0, "critical", ()),
+    ("80 Mbps + 1 / 1 kpps", 80_000_001.0, 1_000.0, None, ("BITS-warning",)),
+    ("exato 20 kpps / 1 Mbps", 1_000_000.0, 20_000.0, "critical", ()),
+    ("20 kpps + 1 / 1 Mbps", 1_000_000.0, 20_001.0, None, ("PPS-warning",)),
+    ("exato 100 Mbps / 1 kpps", 100_000_000.0, 1_000.0, None, ("BITS-warning",)),
+    ("100 Mbps + 1 / 1 kpps", 100_000_001.0, 1_000.0, None, ("BITS-warning", "BITS-critical")),
+    ("exato 40 kpps / 1 Mbps", 1_000_000.0, 40_000.0, None, ("PPS-warning",)),
+    ("40 kpps + 1 / 1 Mbps", 1_000_000.0, 40_001.0, None, ("PPS-warning", "PPS-critical")),
+)
+
+
+class DnsReflectionBandSplitTest(unittest.TestCase):
+    """Fase 4.2: o preset single cobre a faixa sensivel e cede a faixa dos legados."""
+
+    def band_evaluator(self):
+        preset = inbound_vectors.get_preset("dns_reflection")
+        evaluator = detection_triggers.evaluator_for(preset.warning_expr, preset.critical_expr)
+        self.assertIsNotNone(evaluator)
+        return evaluator
+
+    def band_severity(self, evaluator, bps: float, pps: float):
+        return evaluator.evaluate(detection_triggers.frame_metrics({"bits_s": bps, "packets_s": pps}))
+
+    def test_dns_reflection_single_uses_band_split_expressions(self):
+        preset = inbound_vectors.get_preset("dns_reflection")
+        expected_warning = "(bps >= 15M OR pps >= 3k) AND NOT (bps > 80M OR pps > 20k)"
+        expected_critical = "(bps >= 30M OR pps >= 8k) AND NOT (bps > 80M OR pps > 20k)"
+        self.assertEqual(preset.warning_expr, expected_warning)
+        self.assertEqual(preset.critical_expr, expected_critical)
+        payload = inbound_vectors.preset_rule_payload(preset)
+        canonical_warning, warning_issues = detection_triggers.canonicalize_trigger_expression(
+            payload["trigger_warning_expr"]
+        )
+        canonical_critical, critical_issues = detection_triggers.canonicalize_trigger_expression(
+            payload["trigger_critical_expr"]
+        )
+        self.assertEqual(warning_issues, [])
+        self.assertEqual(critical_issues, [])
+        self.assertEqual(canonical_warning, expected_warning)
+        self.assertEqual(canonical_critical, expected_critical)
+
+    def test_boundary_matrix_matches_plan(self):
+        evaluator = self.band_evaluator()
+        for name, bps, pps, expected_band, expected_legacy in DNS_BAND_SPLIT_BOUNDARY_CASES:
+            with self.subTest(case=name):
+                self.assertEqual(self.band_severity(evaluator, bps, pps), expected_band)
+                self.assertEqual(legacy_dns_amp_severities(bps, pps), expected_legacy)
+
+    def test_no_overlap_and_no_gap_between_band_split_and_legacy_rules(self):
+        evaluator = self.band_evaluator()
+        base = detection_triggers.evaluator_for("bps >= 15M OR pps >= 3k", "bps >= 30M OR pps >= 8k")
+        self.assertIsNotNone(base)
+        bps_points = (79_000_000.0, 80_000_000.0, 80_000_001.0, 99_999_999.0, 100_000_000.0, 100_000_001.0, 120_000_000.0)
+        pps_points = (19_999.0, 20_000.0, 20_001.0, 39_999.0, 40_000.0, 40_001.0, 50_000.0)
+        checked = 0
+        for bps in bps_points:
+            for pps in pps_points:
+                metrics = detection_triggers.frame_metrics({"bits_s": bps, "packets_s": pps})
+                band = evaluator.evaluate(metrics)
+                base_severity = base.evaluate(metrics)
+                legacy = legacy_dns_amp_severities(bps, pps)
+                checked += 1
+                self.assertFalse(band is not None and legacy, f"overlap novo x legado em bps={bps} pps={pps}")
+                self.assertFalse(
+                    base_severity is not None and band is None and not legacy,
+                    f"gap do band-split em bps={bps} pps={pps}",
+                )
+        self.assertEqual(checked, len(bps_points) * len(pps_points))
+
+    def test_exact_legacy_boundaries_follow_strict_over_operator(self):
+        evaluator = self.band_evaluator()
+        self.assertEqual(
+            self.band_severity(evaluator, 80_000_000.0, 1_000.0),
+            "critical",
+        )
+        self.assertEqual(
+            self.band_severity(evaluator, 1_000_000.0, 20_000.0),
+            "critical",
+        )
+        self.assertIsNone(self.band_severity(evaluator, 80_000_001.0, 1_000.0))
+        self.assertIsNone(self.band_severity(evaluator, 1_000_000.0, 20_001.0))
 
 
 def issue_text(issues) -> str:

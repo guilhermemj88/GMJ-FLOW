@@ -140,14 +140,18 @@ _register(InboundVectorPreset(
     id="dns_reflection",
     name="DNS Reflection",
     family="reflection",
-    description="Respostas DNS (src_port 53) refletidas para alvos internos.",
+    description=(
+        "Respostas DNS (src_port 53) refletidas para alvos internos. Band-split: "
+        "cede a faixa de WARNING dos legados de amplificacao DNS (bps > 80M "
+        "ou pps > 20k), evitando evento duplicado sobre eles."
+    ),
     protocol="UDP",
     src_port="53",
     metric="bits_s",
     warning_value=15_000_000.0,
     critical_value=30_000_000.0,
-    warning_expr="bps >= 15M OR pps >= 3k",
-    critical_expr="bps >= 30M OR pps >= 8k",
+    warning_expr="(bps >= 15M OR pps >= 3k) AND NOT (bps > 80M OR pps > 20k)",
+    critical_expr="(bps >= 30M OR pps >= 8k) AND NOT (bps > 80M OR pps > 20k)",
     warning_multi_expr=_reflection_multi_warning(),
     critical_multi_expr=_reflection_multi_critical(),
     warning_multi_value=50_000_000.0,

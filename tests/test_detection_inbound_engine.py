@@ -153,6 +153,29 @@ class TriggerEngineTest(unittest.TestCase):
         self.assertIn("toString(flow_raw.src_ip) AS unique_src_ip_value", sql)
         self.assertIn("toString(flow_raw.dst_ip) AS dst_ip", sql)
 
+    def test_dns_reflection_band_split_leaves_legacy_warning_band_to_legacy_rules(self):
+        rule = rule_from_preset("dns_reflection")
+        rows = [
+            make_row(bits_s=85_000_000.0, packets_s=5_000.0, metric_value=85_000_000.0),
+            make_row(bits_s=80_000_000.0, packets_s=1_000.0, metric_value=80_000_000.0),
+            make_row(bits_s=50_000_000.0, packets_s=25_000.0, metric_value=50_000_000.0),
+            make_row(bits_s=20_000_000.0, packets_s=4_000.0, metric_value=20_000_000.0),
+        ]
+        items, _ = run_rule(rule, rows)
+        self.assertEqual([item["matched"] for item in items], [False, True, False, True])
+        self.assertEqual(items[1]["severity"], "critical")
+        self.assertEqual(items[3]["severity"], "warning")
+
+    def test_legacy_dns_amp_over_comparison_is_strict(self):
+        self.assertFalse(backend_main.comparison_matches(80_000_000.0, 80_000_000.0, "over"))
+        self.assertTrue(backend_main.comparison_matches(80_000_001.0, 80_000_000.0, "over"))
+        self.assertFalse(backend_main.comparison_matches(20_000.0, 20_000.0, "over"))
+        self.assertTrue(backend_main.comparison_matches(20_001.0, 20_000.0, "over"))
+        self.assertFalse(backend_main.comparison_matches(100_000_000.0, 100_000_000.0, "over"))
+        self.assertTrue(backend_main.comparison_matches(100_000_001.0, 100_000_000.0, "over"))
+        self.assertFalse(backend_main.comparison_matches(40_000.0, 40_000.0, "over"))
+        self.assertTrue(backend_main.comparison_matches(40_001.0, 40_000.0, "over"))
+
     def test_dns_reflection_multi_target_carpet_bombing(self):
         rule = rule_from_preset("dns_reflection", multi=True)
         rows = [
@@ -282,8 +305,14 @@ class SavePathValidationTest(unittest.TestCase):
     def test_single_payload_canonicalizes_trigger(self):
         payload = dict(inbound_vectors.preset_rule_payload(inbound_vectors.get_preset("dns_reflection")))
         data = self._normalize(payload)
-        self.assertEqual(data["trigger_warning_expr"], "bps >= 15M OR pps >= 3k")
-        self.assertEqual(data["trigger_critical_expr"], "bps >= 30M OR pps >= 8k")
+        self.assertEqual(
+            data["trigger_warning_expr"],
+            "(bps >= 15M OR pps >= 3k) AND NOT (bps > 80M OR pps > 20k)",
+        )
+        self.assertEqual(
+            data["trigger_critical_expr"],
+            "(bps >= 30M OR pps >= 8k) AND NOT (bps > 80M OR pps > 20k)",
+        )
         self.assertEqual(data["evidence"], "bits_s,packets_s,flows_s,avg_packet_bytes,unique_src_ips,unique_src_ports,unique_dst_ips")
         self.assertEqual(data["metric"], "bits_s")
         self.assertEqual(data["direction"], "receives")
@@ -324,7 +353,10 @@ class SavePathValidationTest(unittest.TestCase):
         payload["warning_value"] = None
         payload["critical_value"] = None
         data = self._normalize(payload)
-        self.assertEqual(data["trigger_warning_expr"], "bps >= 15M OR pps >= 3k")
+        self.assertEqual(
+            data["trigger_warning_expr"],
+            "(bps >= 15M OR pps >= 3k) AND NOT (bps > 80M OR pps > 20k)",
+        )
 
     def test_no_trigger_and_no_values_is_rejected(self):
         payload = dict(inbound_vectors.preset_rule_payload(inbound_vectors.get_preset("dns_reflection")))
