@@ -297,6 +297,26 @@ Cada `query_clickhouse` abre e fecha um cliente novo: **0,034 s/query** vs **0,0
 reutilizando o cliente → **0,029 s/query** de overhead (~86% do custo de uma query trivial),
 ≈4,9 s por passo de 168 queries. Não é o gargalo principal, mas é ganho fácil (PERF-A.2).
 
+### 10.3 Onde o tempo foi parar (medição decisiva)
+
+O MESMO passo, instrumentado por fase, dentro do container:
+
+| Componente | Tempo | Por query |
+|---|---|---|
+| conexão ClickHouse (`get_client`) | 4,7 s | 28 ms |
+| execução da query (`client.query`) | **22,7 s** | 133 ms |
+| Python (montagem do SQL + linhas + itens, 31 387 linhas) | 14,7 s | — |
+| **wall do passo (processo isolado)** | **42,1 s** | — |
+| **wall do passo no processo de produção (uvicorn)** | **~180 s** | — |
+
+Ou seja: quando roda isolado, o passo leva ~42 s; dentro do processo da API leva ~180 s.
+A diferença (~140 s) **não é ClickHouse nem Python puro — é contenção**: o backend roda 10+
+threads (SNMP, BGP, ASN, threat intel, behavioral, HTTP) e o GIL serializa o trabalho
+Python. Como as queries ficaram 4× mais rápidas (147 s → 23 s), a espera passou a dominar.
+
+**Conclusão:** o próximo ganho de wall não vem de otimizar SQL, e sim de **isolar o detector**
+(processo/container próprio) — o que também destrava o paralelismo real (PERF-C).
+
 ---
 
 ## 11. Semântica event-time × ingestion-time (medida no servidor real)
@@ -449,16 +469,19 @@ janelas diferentes sem mudança estrutural.
 
 ## 14. Próximos passos recomendados
 
-1. **PERF-A.2** (barato, alto ganho): reutilizar um cliente ClickHouse por ciclo
-   (economiza ~0,03 s × 168 ≈ 5 s) e **isolar a fase legada** (`active_attack_vectors`) da
-   fase de `detection_template_rules`, para que o passe de regras rode no próprio cadence.
-2. **Deploy do PERF-B** (decisão do operador): ligar a reconciliação e acompanhar
+1. **PERF-A.2** (barato): reutilizar um cliente ClickHouse por ciclo (≈5 s por passo) e
+   **isolar a fase legada** (`active_attack_vectors`) da fase de `detection_template_rules`.
+2. **PERF-C.0 — isolar o detector em processo/container próprio** (maior ganho de wall):
+   medido que ~140 s do passo de ~180 s são contenção/GIL com as outras threads da API.
+   Com o detector isolado, o passo volta aos ~42 s medidos em isolamento e o paralelismo
+   por execution group passa a ser real.
+3. **Deploy do PERF-B** (decisão do operador): ligar a reconciliação e acompanhar
    `buckets_pending`/`detector_lag_seconds` por 3+ ciclos; se o custo incomodar, desligar por
    `GMJFLOW_DETECTION_RECONCILE_ENABLED=false`.
-3. **PERF-C** (paralelismo): 2 workers (um por template), máximo 4; o cursor por
+4. **PERF-C** (paralelismo): 2 workers (um por template), máximo 4; o cursor por
    `(template, window)` já permite paralelizar por execution group sem processar o mesmo
    bucket duas vezes.
-4. Limpar o **prefixo duplicado** (zona 7, `45.163.144.0/22`, id 12) — ação de DADO, com
+5. Limpar o **prefixo duplicado** (zona 7, `45.163.144.0/22`, id 12) — ação de DADO, com
    autorização explícita (não fazer em código, pois muda a `dedupe_key` de regras `subnet`).
 
 ---
