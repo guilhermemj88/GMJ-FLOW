@@ -31744,6 +31744,12 @@ def query_detection_rule_candidates(
         if group_by_dst_port:
             group_column_names.append("dst_port")
     group_columns = ", ".join(group_column_names)
+    # PERF-A.1: ORDER BY deterministico. A metrica continua sendo o criterio
+    # PRINCIPAL; a chave do GROUP BY entra apenas como desempate (tiebreaker),
+    # garantindo o mesmo top-N (LIMIT) em execucoes repetidas com os mesmos dados.
+    order_tiebreaker_sql = ", ".join(
+        f"{column} ASC" for column in (["bucket"] + [item for item in group_column_names if item != "bucket"])
+    )
     grouped_internal_ip_expr = (
         ("src_ip AS internal_ip" if clean_text(rule.get("direction")).lower() == "transmits" else "dst_ip AS internal_ip")
         if group_by_src_port
@@ -31808,6 +31814,7 @@ def query_detection_rule_candidates(
             GROUP BY {group_columns}
         )
         SELECT
+            bucket,
             src_ip,
             {final_src_port_expr}
             dst_ip,
@@ -31833,7 +31840,7 @@ def query_detection_rule_candidates(
             detected_exporter_ip,
             detected_sensor_name
         FROM grouped
-        ORDER BY metric_value DESC
+        ORDER BY metric_value DESC, {order_tiebreaker_sql}
         LIMIT {{limit:UInt32}}
         """
     # Cache por ciclo: SQL + parametros identicos => MESMAS linhas. Evita refazer
