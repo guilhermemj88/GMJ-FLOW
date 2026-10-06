@@ -176,6 +176,10 @@ def ensure_anomaly_correlation_schema(conn: sqlite3.Connection) -> None:
     database_key = _connection_database_key(conn)
     if database_key in _SCHEMA_READY_PATHS:
         return
+    try:
+        ensure_cgnat_schema(conn)
+    except Exception:
+        logger.warning("Schema CGNAT indisponivel ao preparar correlacao de anomalias", exc_info=True)
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS anomaly_occurrences (
@@ -266,25 +270,36 @@ def _prefix_candidate(anomaly: Mapping[str, Any], table: str) -> str:
     return ""
 
 
-def _cgnat_pool_matches(conn: sqlite3.Connection, ip_text: str) -> list[str]:
+def _active_pool_networks(conn: sqlite3.Connection) -> list[Any]:
+    try:
+        rows = conn.execute("SELECT prefix FROM cgnat_pools WHERE active = 1").fetchall()
+    except sqlite3.Error:
+        return []
+    networks: list[Any] = []
+    for row in rows:
+        prefix = _clean(row[0] if not isinstance(row, sqlite3.Row) else row["prefix"])
+        try:
+            networks.append(ipaddress.ip_network(prefix, strict=False))
+        except ValueError:
+            continue
+    return networks
+
+
+def _cgnat_pool_matches(
+    conn: sqlite3.Connection,
+    ip_text: str,
+    *,
+    pool_networks: list[Any] | None = None,
+) -> list[str]:
     if not ip_text:
         return []
     try:
         address = ipaddress.ip_address(ip_text)
     except ValueError:
         return []
-    try:
-        ensure_cgnat_schema(conn)
-        rows = conn.execute("SELECT prefix FROM cgnat_pools WHERE active = 1").fetchall()
-    except sqlite3.Error:
-        return []
+    networks = _active_pool_networks(conn) if pool_networks is None else pool_networks
     matches: list[str] = []
-    for row in rows:
-        prefix = _clean(row[0] if not isinstance(row, sqlite3.Row) else row["prefix"])
-        try:
-            network = ipaddress.ip_network(prefix, strict=False)
-        except ValueError:
-            continue
+    for network in networks:
         if address.version == network.version and address in network:
             matches.append(str(network))
     return matches
@@ -296,6 +311,7 @@ def resolve_subject_for_anomaly(
     *,
     table: str,
     resolve_cgnat: bool = True,
+    pool_networks: list[Any] | None = None,
 ) -> dict[str, Any]:
     """Resolve o sujeito canonico de uma anomalia (persistivel).
 
@@ -333,7 +349,7 @@ def resolve_subject_for_anomaly(
             "subject_confidence": "low",
             "subject_context": {**context, "reason": "subject_unresolved"},
         }
-    pool_matches = _cgnat_pool_matches(conn, ip_text) if resolve_cgnat else []
+    pool_matches = _cgnat_pool_matches(conn, ip_text, pool_networks=pool_networks) if resolve_cgnat else []
     if not pool_matches:
         return {
             "subject_type": SUBJECT_TYPE_IP,
@@ -854,6 +870,7 @@ def _backfill_one_table(conn: sqlite3.Connection, table: str, first_column: str,
         """,
         (table,),
     ).fetchall()
+    pool_networks = _active_pool_networks(conn)
     inserted = 0
     for row in rows:
         anomaly = dict(row)
@@ -864,7 +881,7 @@ def _backfill_one_table(conn: sqlite3.Connection, table: str, first_column: str,
         last_dt = parse_datetime_text(anomaly.get(last_column)) or first_dt or _now()
         if first_dt is None:
             first_dt = last_dt
-        subject = resolve_subject_for_anomaly(conn, anomaly, table=table)
+        subject = resolve_subject_for_anomaly(conn, anomaly, table=table, pool_networks=pool_networks)
         metric = _metric_from_anomaly(anomaly)
         metric_value = _metric_value_from_anomaly(anomaly, metric)
         ended_at = _clean(anomaly.get("ended_at")) or None
