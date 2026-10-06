@@ -162,6 +162,20 @@ rodar em processo/container proprio (`gmj-flow-detector`, mesma imagem, entrypoi
 - **Rollback:** restaurar `docker-compose.yml.bak-pre-perf-c0-20261006`, `docker compose up -d
   --no-deps backend` e `docker stop gmj-flow-detector`.
 
+### PERF-B: ativado em teste e REPROVADO (mantido desligado)
+
+Ativado apenas no worker (`GMJFLOW_DETECTION_RECONCILE_ENABLED=true`) e observado por 4
+ciclos: o ciclo cresceu 96,6 → 142,3 → 185,4 s, as queries 362 → 580 → 786, os buckets por
+ciclo bateram no teto (2 → 4 → 6) e o `detector_lag_seconds` subiu (242 → 262 → 267 s).
+Causa medida: reconciliar um bucket custa ~um passe completo do FAST (~40 s por grupo) e o
+orçamento por 60 s de tempo real nao cabe (~120 s de trabalho para 60 s). **Desativado**
+(`RECONCILE_ENABLED=false`); ciclos voltaram a ~54 s.
+
+O que ficou provado: buckets de reconciliacao **alinhados e contiguos** (14:31→14:32→…→14:37,
+via `system.query_log`), cursor persistido avancando 60 s por bucket, **sem duplicacao** de
+anomalias (68 no total, 1 ativo) e cobertura do watermark de **99,485% com 240 s** (vs 99,704%
+com 300 s) — recomendacao: manter 240 s.
+
 ## Teste de vetor
 
 Na tela **Vetores de Ataque**, cada linha possui o botao **Testar agora**. O botao executa imediatamente o vetor nos ultimos 60 segundos e abre um modal com:

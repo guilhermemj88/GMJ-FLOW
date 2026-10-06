@@ -616,3 +616,94 @@ group (template/janela), usando o cursor por `(template, window_seconds)` do PER
 processar o mesmo bucket duas vezes. Medir CPU do ClickHouse, latência das queries e ingestão.
 Só se o isolamento não bastar, avaliar CPU limits/cpuset/nice (não aplicados ainda).
 
+---
+
+## 17. PERF-B ativado em produção — resultado: REPROVADO (desativado em 2026-10-06)
+
+Ativação controlada **apenas no worker** (`GMJFLOW_DETECTION_RECONCILE_ENABLED=true`,
+`docker compose up -d --no-deps detector`, sem rebuild). Observação de 4 ciclos.
+
+### 17.1 Custo medido (PERF-B OFF × ON)
+
+| Métrica | OFF (baseline) | ON — ciclo 1 | ON — ciclo 2 | ON — ciclo 3 |
+|---|---|---|---|---|
+| passo de regras (status) | 38,9–42,4 s | 96,6 s | 142,3 s | **185,4 s** |
+| ciclo completo (worker) | 52,4–57,6 s | 110,1 s | 155,1 s | (seguindo) |
+| queries | 168–173 | 362 | 580 | **786** |
+| scan_cache_hits | 39–42 | 50 | 58 | — |
+| buckets processados | 0 | 2 | 4 | **6 (= teto)** |
+| `detector_lag_seconds` | 0 | 242 s | 262 s | **267 s** |
+| cursor (`last_evaluated_until`) | — | 14:32 | 14:34 | 14:37 |
+| CPU ClickHouse (pico) | ~468% | ~349% | ~412% | ~495% |
+| Ingestão (amostras) | 1,2–3,7 k rows/s | 1,2–3,5 k rows/s | idem | idem |
+
+### 17.2 Por que reprovou (não é impressão — é orçamento)
+
+O ciclo **cresce monotonicamente** (96 → 142 → 185 s), as queries crescem (362 → 580 → 786),
+os buckets por ciclo batem no teto (2 → 4 → 6) e o `detector_lag_seconds` **cresce**
+(242 → 262 → 267 s). Como o teto é 6 buckets/ciclo = 3 por grupo = 180 s de bucket por grupo,
+enquanto cada ciclo consome ~215 s de tempo real, o atraso aumenta ~35 s por ciclo —
+**backlog sem limite**.
+
+Matemática do orçamento (medida): um passe do FAST custa ~40 s para 60 s de dados; a
+reconciliação de um bucket por grupo custa ~40 s por grupo. Por 60 s de tempo real o detector
+precisa de ~40 s (FAST) + 2 × ~40 s (reconciliação) ≈ **120 s de trabalho para 60 s de
+orçamento (2×)**. Ou seja: a reconciliação "custa um passe do FAST por bucket", e isso não
+cabe no orçamento enquanto o passe completo for o único jeito de reconciliar.
+
+**Critério de aceite (seção 8 do pedido): REPROVADO** em "buckets_pending não cresce sem
+limite" / "reconciliation não pode fazer o detector ficar para trás". Ação tomada:
+`GMJFLOW_DETECTION_RECONCILE_ENABLED=false` (somente detector) → ciclos voltaram a
+**54,3 s / 54,5 s** ✓, sem rebuild, sem tocar backend/PMACCT/ClickHouse/frontend.
+
+> **Nota operacional para reativar:** o cursor ficou em `2026-10-06T14:37:00Z` (t1 e t2).
+> Ao religar o reconciliation, ele tentará reconciliar todo o intervalo desde essa marca
+> (6 buckets/ciclo). Para começar "do agora", limpar o cursor antes:
+> `DELETE FROM detection_cursor;` (a linha será recriada no bootstrap no próximo ciclo).
+
+### 17.3 O que ficou PROVADO (positivo)
+
+- **Contiguidade dos buckets (prova objetiva, via `system.query_log`)**: os buckets de
+  reconciliação usados foram
+  `14:31:00–14:32:00`, `14:32:00–14:33:00`, `14:33:00–14:34:00`, `14:34:00–14:35:00`,
+  `14:35:00–14:36:00`, `14:36:00–14:37:00` — **alinhados ao minuto e contíguos** (cada um
+  termina exatamente onde o próximo começa), ~194–206 queries cada. Os do FAST continuam
+  deslizantes (por desenho).
+- **Cursor**: persistido por `(template_id, window_seconds)`, avançando 60 s por bucket
+  (14:32 → 14:34 → 14:37) e sobrevivendo aos recreates do container (retomada pelo banco).
+- **Sem duplicação FAST/FAST+reconciliação**: `security_anomalies` total permaneceu 68
+  (1 ativo) durante todo o teste; a `dedupe_key` não tem componente temporal (teste unitário).
+- **Cobertura do watermark (medida, 35 buckets fechados / 4,9 M linhas)**:
+  **240 s = 99,485%** · **300 s = 99,704%** (25 298 linhas tardias em 4 buckets).
+  **Recomendação: manter 240 s** — os +0,22 p.p. de 300 s não justificam +60 s de latência de
+  alerta; a cauda residual (>300 s) não é coberta por nenhum dos dois.
+
+### 17.4 Como viabilizar PERF-B (próximo lote — não implementado aqui)
+
+1. **Triagem barata por bucket**: uma query agregada leve (ex.: `sum(packets)`, `sum(bytes)`,
+   `max(...)`) por escopo/bucket para decidir se vale o passe completo. Buckets sem tráfego
+   relevante custam ~1 query em vez de ~84–100 scans (a maior parte do custo).
+2. **Reconciliação direcionada**: reavaliar apenas os escopos/targets que o FAST já sinalizou
+   (consolida o evento; não recupera detecção perdida).
+3. **Baratear o passe completo** (shared scan / frame multi-métrica, ex-PERF-A.2) até ele caber
+   no orçamento de 60 s.
+4. Enquanto isso, aumentar `RECONCILE_MAX_BUCKETS` **não** resolve (o déficit é por unidade de
+   tempo) e ligar 2 workers só antecipa a saturação.
+
+## 18. PERF-C.1 — preparação (NÃO implementado: gate não atendido)
+
+O item 9 do pedido condiciona PERF-C.1 a "PERF-B estável por ≥5 ciclos". Como o PERF-B foi
+reprovado e desativado, **os 2 workers não foram implementados**.
+
+Preparação já pronta no código (PERF-B):
+
+- **Unidade de paralelismo correta**: `(template_id, window_seconds)` — hoje 2 execution
+  groups (t1/t2, ambos com janela 60 s), com **um cursor independente por grupo**, o que
+  permite atribuir cada grupo a um worker sem que dois processos processem o mesmo bucket.
+- **Orçamento medido (isolado)**: FAST ≈ 40 s por ciclo; reconhecimento por bucket ≈ 40 s por
+  grupo. Com 2 threads por grupo o wall do FAST cairia para ~20–25 s **se** o trabalho total
+  por unidade de tempo couber no orçamento — hoje não cabe com a reconciliação ligada.
+- **Recomendação**: primeiro aplicar §17.4 (reconciliação barata) e revalidar o PERF-B; só
+  então implementar 2 workers por execution group (máx 4), medindo ClickHouse, latência e
+  **ingestão** (critério: não sacrificar ingestão para ganhar wall).
+
