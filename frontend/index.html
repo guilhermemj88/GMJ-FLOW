@@ -31640,6 +31640,8 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
 
     function openCgnatDeleteModal(batchId, status) {
       pendingCgnatDeleteBatchId = Number(batchId) || null;
+      const confirmButton = document.getElementById('confirmCgnatDeleteButton');
+      if (confirmButton) confirmButton.disabled = false;
       const normalized = String(status || '');
       setText('cgnatDeleteModalTitle', `Excluir lote #${batchId}?`);
       setText(
@@ -31654,13 +31656,20 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
     async function confirmCgnatBatchDelete() {
       const batchId = pendingCgnatDeleteBatchId;
       if (!batchId) return;
+      const confirmButton = document.getElementById('confirmCgnatDeleteButton');
+      if (confirmButton) {
+        if (confirmButton.disabled) return;
+        confirmButton.disabled = true;
+      }
       try {
         await apiRequest(`/api/cgnat/imports/${batchId}`, { method: 'DELETE' });
       } catch (error) {
+        if (confirmButton) confirmButton.disabled = false;
         showGmjToast(`Falha ao excluir lote #${batchId}: ${error.message}`);
         throw error;
       }
       pendingCgnatDeleteBatchId = null;
+      if (confirmButton) confirmButton.disabled = false;
       closeModal('cgnatDeleteModal');
       showGmjToast(`Lote #${batchId} excluído.`);
       setText('cgnatProgress', `Lote #${batchId} excluído.`);
