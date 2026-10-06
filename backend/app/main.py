@@ -752,6 +752,15 @@ DETECTION_SCHEDULER_STATUS: dict[str, Any] = {
     "rules_evaluated_last_run": 0,
     "anomalies_created_last_run": 0,
     "skipped_reasons": {},
+    "cycle_duration_seconds": 0.0,
+    "queries_last_cycle": 0,
+    "scan_cache_hits": 0,
+    "scan_cache_misses": 0,
+    "buckets_processed": 0,
+    "buckets_pending": 0,
+    "last_evaluated_until": "",
+    "watermark_at": "",
+    "detector_lag_seconds": 0,
 }
 BGP_EXPIRATION_STOP = threading.Event()
 BGP_EXPIRATION_THREAD: threading.Thread | None = None
@@ -3670,6 +3679,19 @@ def ensure_ip_zone_detection_db(conn: sqlite3.Connection) -> None:
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             FOREIGN KEY(detection_template_id) REFERENCES detection_templates(id) ON DELETE SET NULL
+        )
+        """
+    )
+    # PERF-B: cursor temporal por (template, janela). Avanca somente sobre buckets
+    # FECHADOS e apenas apos sucesso; permite retomar do ponto exato apos restart.
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS detection_cursor (
+            template_id INTEGER NOT NULL,
+            window_seconds INTEGER NOT NULL,
+            last_evaluated_until TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (template_id, window_seconds)
         )
         """
     )
@@ -36660,14 +36682,38 @@ def record_detection_rule_runtime(
     conn.execute(
         """
         UPDATE detection_template_rules
-        SET last_check_at = ?,
-            last_match_at = CASE WHEN ? THEN ? ELSE last_match_at END,
-            last_anomaly_at = CASE WHEN ? THEN ? ELSE last_anomaly_at END,
-            last_skip_reason = ?,
+        SET last_check_at = CASE
+                WHEN last_check_at IS NULL OR last_check_at = '' OR last_check_at < ? THEN ?
+                ELSE last_check_at
+            END,
+            last_match_at = CASE
+                WHEN ? = 1 AND (last_match_at IS NULL OR last_match_at = '' OR last_match_at < ?) THEN ?
+                ELSE last_match_at
+            END,
+            last_anomaly_at = CASE
+                WHEN ? = 1 AND (last_anomaly_at IS NULL OR last_anomaly_at = '' OR last_anomaly_at < ?) THEN ?
+                ELSE last_anomaly_at
+            END,
+            last_skip_reason = CASE
+                WHEN last_check_at IS NULL OR last_check_at = '' OR last_check_at <= ? THEN ?
+                ELSE last_skip_reason
+            END,
             updated_at = updated_at
         WHERE id = ?
         """,
-        (checked_at, 1 if matched else 0, checked_at, 1 if anomaly_created else 0, checked_at, skipped_reason, rule_id),
+        (
+            checked_at,
+            checked_at,
+            1 if matched else 0,
+            checked_at,
+            checked_at,
+            1 if anomaly_created else 0,
+            checked_at,
+            checked_at,
+            checked_at,
+            skipped_reason,
+            rule_id,
+        ),
     )
 
 
@@ -36807,6 +36853,188 @@ def evaluate_detection_template_rule(
     return result
 
 
+def detection_reconcile_enabled() -> bool:
+    raw = os.getenv("GMJFLOW_DETECTION_RECONCILE_ENABLED", "true")
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def detection_watermark_seconds() -> int:
+    raw = os.getenv("GMJFLOW_DETECTION_WATERMARK_SECONDS", "240")
+    try:
+        return max(0, min(3600, int(raw)))
+    except (TypeError, ValueError):
+        return 240
+
+
+def detection_reconcile_max_buckets() -> int:
+    raw = os.getenv("GMJFLOW_DETECTION_RECONCILE_MAX_BUCKETS", "6")
+    try:
+        return max(1, min(60, int(raw)))
+    except (TypeError, ValueError):
+        return 6
+
+
+def detection_bucket_floor(moment: datetime, window_seconds: int) -> datetime:
+    """Alinha `moment` ao INICIO do bucket de `window_seconds` (UTC, epoch-based)."""
+    window = max(1, int(window_seconds))
+    epoch = int(moment.timestamp())
+    return datetime.fromtimestamp(epoch - (epoch % window), tz=timezone.utc)
+
+
+def detection_lag_seconds(last_evaluated_until: Any, reference: datetime) -> int:
+    """Atraso do detector: quanto tempo ja passou desde o fim do ultimo bucket fechado."""
+    parsed = parse_datetime_text(last_evaluated_until)
+    if parsed is None:
+        return 0
+    return max(0, int((reference - parsed).total_seconds()))
+
+
+def detection_cursor_until(conn: sqlite3.Connection, template_id: int, window_seconds: int) -> datetime | None:
+    row = conn.execute(
+        """
+        SELECT last_evaluated_until
+        FROM detection_cursor
+        WHERE template_id = ? AND window_seconds = ?
+        """,
+        (int(template_id), int(window_seconds)),
+    ).fetchone()
+    if row is None:
+        return None
+    return parse_datetime_text(row["last_evaluated_until"])
+
+
+def detection_cursor_write(
+    conn: sqlite3.Connection,
+    template_id: int,
+    window_seconds: int,
+    until_dt: datetime,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO detection_cursor(template_id, window_seconds, last_evaluated_until, updated_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(template_id, window_seconds) DO UPDATE SET
+            last_evaluated_until = excluded.last_evaluated_until,
+            updated_at = excluded.updated_at
+        """,
+        (int(template_id), int(window_seconds), iso(until_dt), utc_now_iso()),
+    )
+
+
+def reconcile_detection_template_buckets(
+    conn: sqlite3.Connection,
+    rows: list[dict[str, Any]],
+    *,
+    end_dt: datetime,
+    create_anomalies: bool = True,
+    active_codecs: list[dict[str, Any]] | None = None,
+    query_cache: "DetectionScanCache | None" = None,
+    evaluator: Any = None,
+) -> dict[str, Any]:
+    """Passo de RECONCILIACAO: processa buckets FECHADOS via cursor persistido.
+
+    - Um cursor por (template_id, window_seconds): o menor numero de cursores que
+      preserva isolamento entre templates com janelas diferentes.
+    - Só avalia buckets fechados: `bucket_end <= now - watermark_seconds`.
+    - O cursor SÓ avanca depois que TODAS as regras do bucket foram avaliadas com
+      sucesso; em caso de falha o bucket fica pendente para o proximo ciclo.
+    - Nunca ha sobreposicao: cada bucket e processado exatamente uma vez (sem gap).
+    - Idempotente: o `dedupe_key` das anomalias e estavel (nao inclui bucket), entao
+      FAST e reconciliacao consolidam o MESMO evento.
+    """
+    watermark_seconds = detection_watermark_seconds()
+    max_buckets = detection_reconcile_max_buckets()
+    limit_dt = end_dt - timedelta(seconds=watermark_seconds)
+    evaluate = evaluator or evaluate_detection_template_rule
+
+    groups: dict[tuple[int, int], list[dict[str, Any]]] = {}
+    for raw_rule in rows:
+        if not (sqlite_bool(raw_rule.get("enabled")) and sqlite_bool(raw_rule.get("template_active"))):
+            continue
+        key = (int(raw_rule["template_id"]), max(1, int(raw_rule.get("window_seconds") or 60)))
+        groups.setdefault(key, []).append(raw_rule)
+
+    processed: list[dict[str, Any]] = []
+    pending = 0
+    anomalies_created = 0
+    skipped_reasons: dict[str, int] = {}
+    cursor_values: list[datetime] = []
+
+    for (template_id, window_seconds), group in sorted(groups.items()):
+        window_delta = timedelta(seconds=window_seconds)
+        cursor = detection_cursor_until(conn, template_id, window_seconds)
+        if cursor is None:
+            # Bootstrap: comeca no bucket fechado imediatamente anterior ao watermark
+            # (nao varre historico) e persiste para os proximos ciclos.
+            cursor = detection_bucket_floor(limit_dt, window_seconds) - window_delta
+            detection_cursor_write(conn, template_id, window_seconds, cursor)
+            conn.commit()
+        while cursor + window_delta <= limit_dt:
+            if len(processed) >= max_buckets:
+                remaining = int((limit_dt - cursor).total_seconds() // window_seconds)
+                pending += max(0, remaining)
+                break
+            bucket_end = cursor + window_delta
+            bucket_failed = False
+            for raw_rule in group:
+                try:
+                    result = evaluate(
+                        conn,
+                        raw_rule,
+                        bucket_end,
+                        create_anomalies=create_anomalies,
+                        active_codecs=active_codecs,
+                        query_cache=query_cache,
+                    )
+                except Exception as exc:
+                    bucket_failed = True
+                    logger.warning(
+                        "Reconciliacao falhou (template=%s janela=%ss bucket=%s): %s",
+                        template_id,
+                        window_seconds,
+                        iso(bucket_end),
+                        exc,
+                    )
+                    break
+                anomalies_created += int((result or {}).get("anomalies_created") or 0)
+                reason = clean_text((result or {}).get("skipped_reason"))
+                if reason:
+                    key = reason.split(":", 1)[0]
+                    skipped_reasons[key] = skipped_reasons.get(key, 0) + 1
+                # Commit por regra: nao segura o lock do SQLite durante o proximo
+                # round-trip do ClickHouse.
+                conn.commit()
+                media_dispatch.flush_pending_created(conn)
+            if bucket_failed:
+                break
+            cursor = bucket_end
+            detection_cursor_write(conn, template_id, window_seconds, cursor)
+            conn.commit()
+            processed.append(
+                {
+                    "template_id": template_id,
+                    "window_seconds": window_seconds,
+                    "start": iso(bucket_end - window_delta),
+                    "end": iso(bucket_end),
+                }
+            )
+        cursor_values.append(detection_cursor_until(conn, template_id, window_seconds) or cursor)
+
+    conn.commit()
+    return {
+        "enabled": True,
+        "watermark_seconds": watermark_seconds,
+        "watermark_at": iso(limit_dt),
+        "max_buckets_per_cycle": max_buckets,
+        "buckets_processed": len(processed),
+        "buckets_pending": pending,
+        "anomalies_created": anomalies_created,
+        "skipped_reasons": skipped_reasons,
+        "last_evaluated_until": iso(min(cursor_values)) if cursor_values else "",
+        "items": processed,
+    }
+
+
 def run_detection_template_rules_once(*, create_anomalies: bool = True) -> dict[str, Any]:
     ensure_sensor_db()
     end_dt = datetime.now(timezone.utc)
@@ -36818,6 +37046,8 @@ def run_detection_template_rules_once(*, create_anomalies: bool = True) -> dict[
     # Cache de scans por ciclo (SQL+params identicos). Reduz queries repetidas
     # sem alterar nenhum resultado — ver docs/detection-performance.md.
     query_cache = DetectionScanCache()
+    cycle_started = time.monotonic()
+    reconciliation: dict[str, Any] = {"enabled": False, "buckets_processed": 0, "buckets_pending": 0}
     try:
         with sqlite_connection() as conn:
             rows = detection_template_rule_rows(conn)
@@ -36844,7 +37074,21 @@ def run_detection_template_rules_once(*, create_anomalies: bool = True) -> dict[
                 # ClickHouse round-trip (database is locked starvation).
                 conn.commit()
                 media_dispatch.flush_pending_created(conn)
+            # PERF-B: passo de reconciliacao (buckets fechados via cursor+watermark).
+            if detection_reconcile_enabled():
+                reconciliation = reconcile_detection_template_buckets(
+                    conn,
+                    rows,
+                    end_dt=end_dt,
+                    create_anomalies=create_anomalies,
+                    active_codecs=active_codecs,
+                    query_cache=query_cache,
+                )
+                anomalies_created += int(reconciliation.get("anomalies_created") or 0)
+                for key, count in (reconciliation.get("skipped_reasons") or {}).items():
+                    skipped_reasons[key] = skipped_reasons.get(key, 0) + int(count)
             conn.commit()
+        cycle_duration = round(time.monotonic() - cycle_started, 2)
         update_detection_scheduler_status(
             last_run_at=started_at,
             last_success_at=utc_now_iso(),
@@ -36853,10 +37097,20 @@ def run_detection_template_rules_once(*, create_anomalies: bool = True) -> dict[
             rules_evaluated_last_run=len(results),
             anomalies_created_last_run=anomalies_created,
             skipped_reasons=skipped_reasons,
+            cycle_duration_seconds=cycle_duration,
+            queries_last_cycle=query_cache.misses,
+            scan_cache_hits=query_cache.hits,
+            scan_cache_misses=query_cache.misses,
+            buckets_processed=int(reconciliation.get("buckets_processed") or 0),
+            buckets_pending=int(reconciliation.get("buckets_pending") or 0),
+            last_evaluated_until=str(reconciliation.get("last_evaluated_until") or ""),
+            watermark_at=str(reconciliation.get("watermark_at") or ""),
+            detector_lag_seconds=detection_lag_seconds(reconciliation.get("last_evaluated_until"), end_dt),
         )
         return {
             "ok": True,
             "started_at": started_at,
+            "cycle_duration_seconds": cycle_duration,
             "rules_enabled": enabled_count,
             "rules_evaluated": len(results),
             "anomalies_created": anomalies_created,
@@ -36866,6 +37120,7 @@ def run_detection_template_rules_once(*, create_anomalies: bool = True) -> dict[
                 "queries_reused": query_cache.hits,
                 "rows_cached": query_cache.total_rows,
             },
+            "reconciliation": reconciliation,
             "items": results,
         }
     except Exception as exc:
@@ -37006,6 +37261,15 @@ def detection_status():
         "rules_evaluated_last_run": int(status.get("rules_evaluated_last_run") or 0),
         "anomalies_created_last_run": int(status.get("anomalies_created_last_run") or 0),
         "skipped_reasons": status.get("skipped_reasons") or {},
+        "cycle_duration_seconds": float(status.get("cycle_duration_seconds") or 0),
+        "queries_last_cycle": int(status.get("queries_last_cycle") or 0),
+        "scan_cache_hits": int(status.get("scan_cache_hits") or 0),
+        "scan_cache_misses": int(status.get("scan_cache_misses") or 0),
+        "buckets_processed": int(status.get("buckets_processed") or 0),
+        "buckets_pending": int(status.get("buckets_pending") or 0),
+        "last_evaluated_until": status.get("last_evaluated_until") or "",
+        "watermark_at": status.get("watermark_at") or "",
+        "detector_lag_seconds": int(status.get("detector_lag_seconds") or 0),
     }
 
 
