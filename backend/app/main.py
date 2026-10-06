@@ -52,7 +52,7 @@ from app.services.humanize import format_bits_per_second, format_bytes, format_f
 from app.services.clickhouse import fetch_learning_traffic_series
 from app.services.sqlite_managed import open_managed
 from app.services import media_dispatch
-from app.services import detection_dsl
+from app.services import detection_dsl, detection_triggers
 from app.services.peak_hunter import ensure_peak_analysis_db
 from app.services.peak_hunter_runner import ensure_peak_hunter_automation_db, mark_peak_hunter_scheduler_started, mark_peak_hunter_scheduler_stopped
 from app.services.peak_hunter_auto import run_peak_hunter_cycle
@@ -1000,14 +1000,22 @@ DETECTION_METRICS = {
     "pps",
     "bps",
     "flows",
+    "unique_src_ips",
     "unique_dst_ips",
     "unique_dst_ports",
     "unique_src_ports",
+    "avg_packet_bytes",
 }
 DETECTION_COMPARISONS = {"over", "under"}
 DETECTION_RESPONSES = {"DETECTION_ONLY", "ALERT_ONLY", "MANUAL_REVIEW", "RESPONSE_PROFILE"}
 DETECTION_WHITELIST_TYPES = {"source", "destination", "source_destination"}
-DETECTION_PROTOCOLS = {item["id"] for item in DECODER_REGISTRY} | {"ALL", "IP/ALL", "FRAGMENTS"}
+DETECTION_PROTOCOLS = {item["id"] for item in DECODER_REGISTRY} | {
+    "ALL",
+    "IP/ALL",
+    "FRAGMENTS",
+    "TCP+SYN-NO-ACK",
+    "TCP+ACK-NO-SYN",
+}
 DETECTION_GROUP_BY_OPTIONS = {
     "",
     "src_ip",
@@ -1581,6 +1589,9 @@ class DetectionRulePayload(BaseModel):
     src_port: str = "any"
     dst_port: str = "any"
     tcp_flags: str = ""
+    trigger_warning_expr: str = ""
+    trigger_critical_expr: str = ""
+    evidence: str = ""
     icmp_type: str = ""
     icmp_code: str = ""
     detection_key: str = ""
@@ -3770,6 +3781,7 @@ def ensure_ip_zone_detection_db(conn: sqlite3.Connection) -> None:
             unique_dst_ips INTEGER,
             unique_dst_ports INTEGER,
             unique_src_ports INTEGER,
+            unique_src_ips INTEGER,
             first_seen TEXT,
             last_seen TEXT,
             acknowledged_at TEXT,
@@ -3801,6 +3813,7 @@ def ensure_ip_zone_detection_db(conn: sqlite3.Connection) -> None:
     ensure_sqlite_column(conn, "security_anomalies", "acknowledged_at", "acknowledged_at TEXT")
     ensure_sqlite_column(conn, "security_anomalies", "sensor_id", "sensor_id INTEGER")
     ensure_sqlite_column(conn, "security_anomalies", "ended_at", "ended_at TEXT")
+    ensure_sqlite_column(conn, "security_anomalies", "unique_src_ips", "unique_src_ips INTEGER NOT NULL DEFAULT 0")
     detection_rule_columns = {
         "display_name": "display_name TEXT NOT NULL DEFAULT ''",
         "src_cidr": "src_cidr TEXT NOT NULL DEFAULT ''",
@@ -3832,6 +3845,9 @@ def ensure_ip_zone_detection_db(conn: sqlite3.Connection) -> None:
         "extra_whitelist_ids": "extra_whitelist_ids TEXT NOT NULL DEFAULT '[]'",
         "bypass_whitelist": "bypass_whitelist INTEGER NOT NULL DEFAULT 0",
         "notes": "notes TEXT NOT NULL DEFAULT ''",
+        "trigger_warning_expr": "trigger_warning_expr TEXT NOT NULL DEFAULT ''",
+        "trigger_critical_expr": "trigger_critical_expr TEXT NOT NULL DEFAULT ''",
+        "evidence": "evidence TEXT NOT NULL DEFAULT ''",
         "last_check_at": "last_check_at TEXT NOT NULL DEFAULT ''",
         "last_match_at": "last_match_at TEXT NOT NULL DEFAULT ''",
         "last_anomaly_at": "last_anomaly_at TEXT NOT NULL DEFAULT ''",
@@ -11398,6 +11414,9 @@ def detection_rule_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, A
         "src_port": item.get("src_port") or "any",
         "dst_port": item.get("dst_port") or "any",
         "tcp_flags": item.get("tcp_flags") or "",
+        "trigger_warning_expr": item.get("trigger_warning_expr") or "",
+        "trigger_critical_expr": item.get("trigger_critical_expr") or "",
+        "evidence": item.get("evidence") or "",
         "icmp_type": item.get("icmp_type") or "",
         "icmp_code": item.get("icmp_code") or "",
         "detection_key": item.get("detection_key") or "",
@@ -11587,12 +11606,32 @@ def normalize_detection_rule_payload(payload: DetectionRulePayload) -> dict[str,
         raise HTTPException(status_code=400, detail="group_by invalido")
     src_port = normalize_detection_port_text(data.get("src_port"), "src_port")
     dst_port = normalize_detection_port_text(data.get("dst_port"), "dst_port")
+    # Triggers booleanos (DSL TRIGGER) sao canonicalizados na MESMA AST do Flow
+    # Search; o motor avalia a expressao em Python sobre o frame multi-metrica.
+    trigger_warning_expr, trigger_warning_issues = detection_triggers.canonicalize_trigger_expression(
+        data.get("trigger_warning_expr")
+    )
+    trigger_critical_expr, trigger_critical_issues = detection_triggers.canonicalize_trigger_expression(
+        data.get("trigger_critical_expr")
+    )
+    trigger_issues = [*trigger_warning_issues, *trigger_critical_issues]
+    if trigger_issues:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "INVALID_TRIGGER_EXPRESSION", "errors": trigger_issues},
+        )
+    evidence_text = normalize_detection_evidence_text(data.get("evidence"))
     cooldown_seconds = data.get("cooldown_seconds")
     if cooldown_seconds is None:
         cooldown_seconds = int(data.get("cooldown_minutes") or 0) * 60
     warning_value = data.get("warning_value")
     critical_value = data.get("critical_value")
-    if warning_value is None and critical_value is None:
+    if (
+        warning_value is None
+        and critical_value is None
+        and not trigger_warning_expr
+        and not trigger_critical_expr
+    ):
         raise HTTPException(status_code=400, detail="warning_value ou critical_value obrigatorio")
     if warning_value is not None and critical_value is not None and float(critical_value) < float(warning_value):
         raise HTTPException(status_code=400, detail="critical_value deve ser maior ou igual ao warning_value")
@@ -11617,6 +11656,9 @@ def normalize_detection_rule_payload(payload: DetectionRulePayload) -> dict[str,
         "src_port": src_port,
         "dst_port": dst_port,
         "tcp_flags": clean_text(data.get("tcp_flags")).lower(),
+        "trigger_warning_expr": trigger_warning_expr,
+        "trigger_critical_expr": trigger_critical_expr,
+        "evidence": evidence_text,
         "icmp_type": clean_text(data.get("icmp_type")),
         "icmp_code": clean_text(data.get("icmp_code")),
         "detection_key": group_by,
@@ -11685,6 +11727,24 @@ def normalize_detection_port_text(value: Any, field_name: str) -> str:
         normalized.append(str(port))
     port_text = ",".join(dict.fromkeys(normalized))
     return f"!{port_text}" if excluded and port_text else port_text or "any"
+
+
+def normalize_detection_evidence_text(value: Any) -> str:
+    """Valida/normaliza a lista EVIDENCE (campos canonicos da DSL)."""
+    raw = clean_text(value)
+    if not raw:
+        return ""
+    fields: list[str] = []
+    for part in raw.split(","):
+        name = part.strip().lower()
+        if not name:
+            continue
+        spec = detection_dsl.resolve_field(name)
+        if spec is None or detection_dsl.SECTION_EVIDENCE not in spec.sections:
+            raise HTTPException(status_code=400, detail=f"evidence invalida: {part.strip()!r}")
+        if spec.name not in fields:
+            fields.append(spec.name)
+    return ",".join(fields)
 
 
 def normalize_detection_whitelist_payload(conn: sqlite3.Connection, payload: DetectionWhitelistPayload) -> dict[str, Any]:
@@ -30476,10 +30536,11 @@ def create_detection_rule(template_id: int, payload: DetectionRulePayload):
                 max_auto_prefixlen_v4, max_auto_prefixlen_v6, require_protected_prefix,
                 duration_seconds, max_active_announcements, min_confidence_for_auto,
                 use_global_whitelist, extra_whitelist_ids, bypass_whitelist, notes,
+                trigger_warning_expr, trigger_critical_expr, evidence,
                 created_at,
                 updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 template_id,
@@ -30526,6 +30587,9 @@ def create_detection_rule(template_id: int, payload: DetectionRulePayload):
                 data["extra_whitelist_ids"],
                 data["bypass_whitelist"],
                 data["notes"],
+                data["trigger_warning_expr"],
+                data["trigger_critical_expr"],
+                data["evidence"],
                 now,
                 now,
             ),
@@ -30588,6 +30652,9 @@ def update_detection_rule(template_id: int, rule_id: int, payload: DetectionRule
                 extra_whitelist_ids = ?,
                 bypass_whitelist = ?,
                 notes = ?,
+                trigger_warning_expr = ?,
+                trigger_critical_expr = ?,
+                evidence = ?,
                 updated_at = ?
             WHERE id = ? AND template_id = ?
             """,
@@ -30635,6 +30702,9 @@ def update_detection_rule(template_id: int, rule_id: int, payload: DetectionRule
                 data["extra_whitelist_ids"],
                 data["bypass_whitelist"],
                 data["notes"],
+                data["trigger_warning_expr"],
+                data["trigger_critical_expr"],
+                data["evidence"],
                 now,
                 rule_id,
                 template_id,
@@ -30791,6 +30861,13 @@ def detection_protocol_condition(protocol: str) -> str:
         "UDP": "proto = 17",
         "TCP": "proto = 6",
         "TCP+SYN": "proto = 6 AND bitAnd(tcp_flags, 2) != 0",
+        "TCP+SYNACK": "proto = 6 AND bitAnd(tcp_flags, 2) != 0 AND bitAnd(tcp_flags, 16) != 0",
+        "TCP+ACK": "proto = 6 AND bitAnd(tcp_flags, 16) != 0",
+        "TCP+RST": "proto = 6 AND bitAnd(tcp_flags, 4) != 0",
+        "TCP+NULL": "proto = 6 AND tcp_flags = 0",
+        "TCP+ALL": "proto = 6",
+        "TCP+SYN-NO-ACK": "proto = 6 AND bitAnd(tcp_flags, 2) != 0 AND bitAnd(tcp_flags, 16) = 0",
+        "TCP+ACK-NO-SYN": "proto = 6 AND bitAnd(tcp_flags, 16) != 0 AND bitAnd(tcp_flags, 2) = 0",
         "ICMP": "proto IN (1, 58)",
         "GRE": "proto = 47",
         "DNS": "proto IN (6, 17) AND (src_port = 53 OR dst_port = 53)",
@@ -30977,6 +31054,8 @@ def metric_expression_for_detection(metric: str) -> str:
         "unique_dst_ips": "unique_dst_ips",
         "unique_dst_ports": "unique_dst_ports",
         "unique_src_ports": "unique_src_ports",
+        "unique_src_ips": "unique_src_ips",
+        "avg_packet_bytes": "if(packets > 0, bytes / packets, 0)",
     }
     return mapping.get(metric, "packets_s")
 
@@ -31688,8 +31767,12 @@ def query_detection_rule_candidates(
 ) -> list[dict[str, Any]]:
     warning = rule.get("warning_value")
     critical = rule.get("critical_value")
+    trigger_evaluator = detection_triggers.evaluator_for(
+        rule.get("trigger_warning_expr"),
+        rule.get("trigger_critical_expr"),
+    )
     warning_threshold = float(warning if warning is not None else critical or 0)
-    if warning_threshold <= 0:
+    if warning_threshold <= 0 and trigger_evaluator is None:
         return []
 
     prefix_param = "prefix_cidr"
@@ -31724,6 +31807,8 @@ def query_detection_rule_candidates(
     unique_dst_ips_expr = "toUInt64(1)" if dst_ip_is_group_key else "uniqExact(unique_dst_ip_value)"
     unique_dst_ports_expr = "toUInt64(1)" if group_by_dst_port else "uniqExact(unique_dst_port_value)"
     unique_src_ports_expr = "toUInt64(1)" if group_by_src_port else "uniqExact(unique_src_port_value)"
+    src_ip_is_group_key = src_expr == "toString(flow_raw.src_ip)"
+    unique_src_ips_expr = "toUInt64(1)" if src_ip_is_group_key else "uniqExact(unique_src_ip_value)"
 
     window_seconds = max(1, int(rule.get("window_seconds") or 60))
     protocol_expr = detection_protocol_label_expr(rule.get("protocol") or "ALL")
@@ -31802,6 +31887,7 @@ def query_detection_rule_candidates(
                 toFloat64(packets) AS packet_value,
                 toFloat64(flow_count) AS flow_value,
                 toString(flow_raw.dst_ip) AS unique_dst_ip_value,
+                toString(flow_raw.src_ip) AS unique_src_ip_value,
                 toUInt16(dst_port) AS unique_dst_port_value,
                 toUInt16(src_port) AS unique_src_port_value,
                 ({factor_expr}) AS multiplier,
@@ -31827,6 +31913,7 @@ def query_detection_rule_candidates(
                 {unique_dst_ips_expr} AS unique_dst_ips,
                 {unique_dst_ports_expr} AS unique_dst_ports,
                 {unique_src_ports_expr} AS unique_src_ports,
+                {unique_src_ips_expr} AS unique_src_ips,
                 min(flow_time) AS first_seen,
                 max(flow_time) AS last_seen,
                 uniqExact(detected_exporter_ip_raw) AS detected_exporter_count,
@@ -31855,6 +31942,7 @@ def query_detection_rule_candidates(
             unique_dst_ips,
             unique_dst_ports,
             unique_src_ports,
+            unique_src_ips,
             first_seen,
             last_seen,
             {metric_alias} AS metric_value,
@@ -31886,15 +31974,33 @@ def query_detection_rule_candidates(
             if clean_text(row.get("protocol")).lower() not in {"udp", "17"}:
                 continue
         metric_value = float(row.get("metric_value") or 0)
-        matched = detection_threshold_matches(rule, metric_value, warning_threshold, rule.get("comparison") or "over")
+        packets_total = float(row.get("packets") or 0)
+        avg_packet_bytes = (float(row.get("bytes") or 0) / packets_total) if packets_total > 0 else 0.0
+        row_metrics: dict[str, float] | None = None
+        if trigger_evaluator is not None:
+            # Trigger booleano (DSL): avalia a expressao sobre o frame completo
+            # do scan (bps/pps/flows/unique_*/avg_packet_bytes) em Python.
+            row_metrics = detection_triggers.frame_metrics({**row, "avg_packet_bytes": avg_packet_bytes})
+            trigger_decision = trigger_evaluator.evaluate(row_metrics)
+            matched = trigger_decision is not None
+            severity = trigger_decision or "warning"
+        else:
+            matched = detection_threshold_matches(rule, metric_value, warning_threshold, rule.get("comparison") or "over")
+            severity = "critical" if critical is not None and detection_threshold_matches(
+                rule,
+                metric_value,
+                float(critical),
+                rule.get("comparison") or "over",
+            ) else "warning"
         if not matched and not include_unmatched:
             continue
-        severity = "critical" if critical is not None and detection_threshold_matches(
-            rule,
-            metric_value,
-            float(critical),
-            rule.get("comparison") or "over",
-        ) else "warning"
+        evidence_fields = [part.strip() for part in clean_text(rule.get("evidence")).split(",") if part.strip()]
+        evidence_values: dict[str, float] = {}
+        if evidence_fields:
+            metrics_for_evidence = row_metrics if row_metrics is not None else detection_triggers.frame_metrics({**row, "avg_packet_bytes": avg_packet_bytes})
+            for evidence_field in evidence_fields:
+                if evidence_field in detection_triggers.TRIGGER_FRAME_KEYS:
+                    evidence_values[evidence_field] = metrics_for_evidence.get(evidence_field, 0.0)
         first_seen = row.get("first_seen")
         last_seen = row.get("last_seen")
         src_ip = clean_ip(row.get("src_ip"))
@@ -31986,6 +32092,9 @@ def query_detection_rule_candidates(
                     "cooldown_seconds",
                     "detection_key",
                     "group_by",
+                    "trigger_warning_expr",
+                    "trigger_critical_expr",
+                    "evidence",
                     "dst_port",
                     "src_port",
                     "response",
@@ -32027,6 +32136,8 @@ def query_detection_rule_candidates(
             "unique_dst_ips": int(row.get("unique_dst_ips") or 0),
             "unique_dst_ports": int(row.get("unique_dst_ports") or 0),
             "unique_src_ports": int(row.get("unique_src_ports") or 0),
+            "unique_src_ips": int(row.get("unique_src_ips") or 0),
+            "avg_packet_bytes": round(avg_packet_bytes, 4),
             "first_seen": iso(first_seen) if isinstance(first_seen, datetime) else clean_text(first_seen),
             "last_seen": iso(last_seen) if isinstance(last_seen, datetime) else clean_text(last_seen),
             "threshold_warning": float(warning_threshold),
@@ -32045,6 +32156,10 @@ def query_detection_rule_candidates(
             "matched": matched,
             "traffic_accounting": traffic_accounting,
             "response": rule_response,
+            "trigger_warning_expr": clean_text(rule.get("trigger_warning_expr")),
+            "trigger_critical_expr": clean_text(rule.get("trigger_critical_expr")),
+            "evidence": clean_text(rule.get("evidence")),
+            "evidence_values": evidence_values,
         }
         items.append(item)
     return items
@@ -32192,6 +32307,8 @@ def upsert_security_anomaly(conn: sqlite3.Connection, candidate: dict[str, Any])
             "critical": candidate.get("threshold_critical"),
             "metric": candidate.get("metric"),
             "comparison": candidate.get("comparison") or "over",
+            "trigger_warning_expr": candidate.get("trigger_warning_expr") or "",
+            "trigger_critical_expr": candidate.get("trigger_critical_expr") or "",
         },
         "observed": {
             "metric_value": candidate.get("metric_value"),
@@ -32199,6 +32316,13 @@ def upsert_security_anomaly(conn: sqlite3.Connection, candidate: dict[str, Any])
             "bits_s": candidate.get("bits_s"),
             "flows_s": candidate.get("flows_s"),
             "flows": candidate.get("flows"),
+            "packets": candidate.get("packets"),
+            "bytes": candidate.get("bytes"),
+            "unique_src_ips": candidate.get("unique_src_ips"),
+            "unique_dst_ips": candidate.get("unique_dst_ips"),
+            "unique_src_ports": candidate.get("unique_src_ports"),
+            "unique_dst_ports": candidate.get("unique_dst_ports"),
+            "avg_packet_bytes": candidate.get("avg_packet_bytes"),
         },
         "top_src_ip": candidate.get("top_src_ip") or candidate.get("src_ip") or candidate.get("internal_ip") or "",
         "top_dst_ip": candidate.get("top_dst_ip") or candidate.get("dst_ip") or "",
@@ -32207,6 +32331,11 @@ def upsert_security_anomaly(conn: sqlite3.Connection, candidate: dict[str, Any])
         "mitigation_basis": candidate.get("mitigation_basis") or "",
         "mitigation_reason": candidate.get("mitigation_reason") or "",
         "traffic_accounting": candidate.get("traffic_accounting") or {},
+        "evidence": candidate.get("evidence_values") or {},
+        "trigger": {
+            "warning_expr": candidate.get("trigger_warning_expr") or "",
+            "critical_expr": candidate.get("trigger_critical_expr") or "",
+        },
         "detection": detection_state,
         "sensor_detection": detected_sensor,
     }
@@ -32240,6 +32369,7 @@ def upsert_security_anomaly(conn: sqlite3.Connection, candidate: dict[str, Any])
         candidate.get("unique_dst_ips") or 0,
         candidate.get("unique_dst_ports") or 0,
         candidate.get("unique_src_ports") or 0,
+        candidate.get("unique_src_ips") or 0,
         candidate.get("first_seen") or now,
         candidate.get("last_seen") or now,
         message,
@@ -32285,17 +32415,18 @@ def upsert_security_anomaly(conn: sqlite3.Connection, candidate: dict[str, Any])
                 "unique_dst_ips": values[25],
                 "unique_dst_ports": values[26],
                 "unique_src_ports": values[27],
-                "first_seen": values[28],
-                "last_seen": values[29],
-                "message": values[30],
-                "recommended_action": values[31],
-                "response": values[32],
-                "dedupe_key": values[33],
-                "anomaly_source": values[34],
-                "source_engine": values[35],
-                "source_id": values[36],
-                "source_name": values[37],
-                "source_details_json": values[38],
+                "unique_src_ips": values[28],
+                "first_seen": values[29],
+                "last_seen": values[30],
+                "message": values[31],
+                "recommended_action": values[32],
+                "response": values[33],
+                "dedupe_key": values[34],
+                "anomaly_source": values[35],
+                "source_engine": values[36],
+                "source_id": values[37],
+                "source_name": values[38],
+                "source_details_json": values[39],
                 "sensor_id": detected_sensor["detected_sensor_id"],
                 "created_at": now,
                 "updated_at": now,
@@ -32334,6 +32465,7 @@ def upsert_security_anomaly(conn: sqlite3.Connection, candidate: dict[str, Any])
             unique_dst_ips = ?,
             unique_dst_ports = ?,
             unique_src_ports = ?,
+            unique_src_ips = ?,
             first_seen = ?,
             last_seen = ?,
             message = ?,
@@ -32408,6 +32540,7 @@ def security_anomaly_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str,
         "unique_dst_ips": int(item.get("unique_dst_ips") or 0),
         "unique_dst_ports": int(item.get("unique_dst_ports") or 0),
         "unique_src_ports": int(item.get("unique_src_ports") or 0),
+        "unique_src_ips": int(item.get("unique_src_ips") or 0),
         "first_seen": item.get("first_seen") or "",
         "last_seen": item.get("last_seen") or "",
         "message": item.get("message") or "",

@@ -81,10 +81,12 @@ class SemanticValidationTest(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertIn("OUT_OF_RANGE", _codes(result))
 
-    def test_avg_packet_bytes_not_allowed_in_trigger(self):
-        ast, result = parse_and_validate("WARNING\navg_packet_bytes >= 100\n")
-        self.assertFalse(result.ok)
-        self.assertIn("FIELD_NOT_ALLOWED_IN_SECTION", _codes(result))
+    def test_avg_packet_bytes_allowed_in_trigger(self):
+        # Fase 4 (2026-10-06): o motor de triggers booleanos passou a aceitar
+        # avg_packet_bytes em WARNING/CRITICAL (metrica derivada do frame do scan).
+        ast, result = parse_and_validate("WARNING\navg_packet_bytes >= 1000\n")
+        self.assertTrue(result.ok, result.as_dict())
+        self.assertEqual(ast.triggers.warning.field, "avg_packet_bytes")
 
     def test_bytes_not_allowed_in_trigger(self):
         ast, result = parse_and_validate("WARNING\nbytes >= 100\n")

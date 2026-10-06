@@ -407,8 +407,11 @@ _register(_field("unique_dst_ports", "Portas destino unicas", "Portas de destino
 # --- EVIDENCE --------------------------------------------------------------
 _register(_field("avg_packet_bytes", "Media de bytes/pacote",
                  "Metrica derivada sum(bytes)/sum(packets); indefinida quando packets=0.",
-                 TYPE_DERIVED, _EVIDENCE, capability="derived_metric_avg_packet_bytes",
-                 origin="derived(sum bytes / sum packets)", clickhouse="derived"))
+                 TYPE_DERIVED, _TRIGGER_EVIDENCE, capability="derived_metric_avg_packet_bytes",
+                 origin="derived(sum bytes / sum packets)", clickhouse="derived",
+                 examples=("avg_packet_bytes >= 1000",),
+                 notes=("Aceito em TRIGGER desde a Fase 4 (motor de triggers booleanos, 2026-10-06); "
+                        "nunca e media de medias por flow.")))
 _register(_field("top_src_ips", "Top IPs origem", "Top IPs de origem (lista).", TYPE_LIST, _EVIDENCE,
                  origin="derived(topK src_ip)", clickhouse="derived"))
 _register(_field("top_dst_ips", "Top IPs destino", "Top IPs de destino (lista).", TYPE_LIST, _EVIDENCE,
