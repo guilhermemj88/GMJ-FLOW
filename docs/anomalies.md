@@ -281,3 +281,13 @@ GROUP BY), com aliases, unidades, validacao estruturada e o dicionario exposto e
 O pacote `backend/app/services/detection_dsl/` (Fase 1) e a base reutilizavel para o Flow
 Search por expressao (Fase 2). Nesta fase o detector atual nao foi alterado e nenhuma regra
 foi migrada.
+
+## Deduplicação de eventos por vetor (auditoria Fase 4.1)
+
+`security_anomaly_dedupe_key` = `vector|zone_id|target|protocol` (no caso DNS inbound:
+`VETOR|<zona>|<ip>/32|UDP`). Consequência prática auditada em 2026-10-06: os três vetores DNS
+inbound (os dois antigos e o preset novo) geram **eventos independentes** para o mesmo
+ataque/target na faixa extrema (≥80 Mbps ou ≥20 kpps) — 2 eventos hoje (A+B) e 3 com o preset
+novo. Tabela de casos, decisão de gate e opções de consolidação em
+[docs/detection-inbound-vectors-2026-10-06.md](detection-inbound-vectors-2026-10-06.md),
+seções 9.4 e 9.5. Repro: `scripts/audit_inbound_dedupe.py`.

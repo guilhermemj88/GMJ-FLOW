@@ -707,3 +707,18 @@ Preparação já pronta no código (PERF-B):
   então implementar 2 workers por execution group (máx 4), medindo ClickHouse, latência e
   **ingestão** (critério: não sacrificar ingestão para ganhar wall).
 
+
+## 19. Fase 4.1 — deploy do motor aditivo (2026-10-06)
+
+- Deploy com **0 presets ativos**: imagem `d509d7c7f629` (backend + detector), rollback
+  `gmj-flow-backend:pre-fase4-20261006` (`c6865fb9bb13`).
+- Ciclo pós-deploy (7 ciclos, sem presets): 53,80 / 66,89* / 55,07 / 53,76 / 53,48 / 52,30 /
+  53,55 s (*outlier isolado) — dentro da faixa pré-deploy (52–58 s); `queries` 168–173;
+  `rules_evaluated=28`; sem erros; ingestão e anomalias estáveis.
+- Custo medido do scan com o frame aditivo (equivalência old × new em janela fixa, 210 scans por
+  lado): old 45,8/44,3 s × new 44,9/46,6 s → **paridade** (dentro do ruído). Os campos novos
+  (`unique_src_ips`, `avg_packet_bytes`, triggers booleanos) ficam dormentes e não regridem o
+  custo das 28 regras atuais.
+- Equivalência: 37.149 itens por lado, 5 matches por lado, decisões idênticas; divergências
+  aparentes são ruído de `any()/argMax` do ClickHouse (ver
+  `docs/detection-inbound-vectors-2026-10-06.md`, seção 9).
