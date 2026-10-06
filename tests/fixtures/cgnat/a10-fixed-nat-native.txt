@@ -1,0 +1,16 @@
+Fixed NAT Configuration was created at 2026 Jan 05 09:30:00
+cgnv6 fixed-nat inside ip-list POOL-INSIDE nat ip-list POOL-OUTSIDE dest-rule-list DESTRULES session-quota 8064 respond-to-user-mac
+NAT Address: 203.0.113.32
+Inside User         Port Range
+100.97.0.0          1024 to 2031
+100.97.0.1          2032 to 3039
+100.97.0.2          3040 to 4047
+NAT Address: 203.0.113.64
+Inside User         Port Range
+100.97.8.0          1024 to 3039
+100.97.8.1          3040 to 5055
+100.97.8.2          5056 to 7071
+100.97.8.3          7072 to 9087
+NAT Address: 203.0.113.99
+Inside User         Port Range
+100.97.9.10         4000 to 5000

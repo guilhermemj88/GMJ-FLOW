@@ -1252,6 +1252,42 @@ def expanded_mapping_table_signature(content: str) -> bool:
     return any(expanded_mapping_header(line) is not None for line in content.splitlines())
 
 
+CGNAT_SOURCE_TYPE_LABELS = {
+    "auto": "Detecção automática",
+    "unknown": "Detecção automática",
+    "a10": "A10 Fixed NAT",
+    "mikrotik_netmap": "MikroTik RouterOS NETMAP",
+    "mikrotik": "MikroTik",
+    "expanded_mapping_table": "Tabela expandida em colunas",
+    "generic": "Genérico",
+    "other": "Outro",
+}
+
+
+def cgnat_source_type_label(value: Any) -> str:
+    source = safe_source_type(value)
+    return CGNAT_SOURCE_TYPE_LABELS.get(source, source)
+
+
+def a10_fixed_nat_signature(content: str) -> bool:
+    lowered = content.casefold()
+    if "fixed nat configuration was created at" in lowered or "cgnv6 fixed-nat" in lowered:
+        return True
+    return "nat address:" in lowered and "inside user" in lowered and "port range" in lowered
+
+
+def with_a10_fixed_nat_hint(payload: dict[str, Any], content: str, selected_label: str) -> dict[str, Any]:
+    if payload.get("records") or not a10_fixed_nat_signature(content):
+        return payload
+    notes = list(payload.get("notes") or [])
+    notes.append(
+        "O arquivo parece ser um export A10 Fixed NAT (NAT Address / Inside User / Port Range), "
+        f"mas o parser selecionado foi {selected_label}. Selecione o formato A10 e reprocesse."
+    )
+    payload["notes"] = notes
+    return payload
+
+
 def parse_expanded_mapping_table(content: str) -> dict[str, Any]:
     lines = content.splitlines()
     header_line = 0
@@ -1342,9 +1378,17 @@ def parse_known_cgnat_text(content: str, source_hint: Any = None) -> dict[str, A
     if source in {"auto", "unknown"} and expanded_mapping_table_signature(content):
         return parse_expanded_mapping_table(content)
     if source == "mikrotik_netmap":
-        return parse_mikrotik_netmap(content)
+        return with_a10_fixed_nat_hint(
+            parse_mikrotik_netmap(content),
+            content,
+            CGNAT_SOURCE_TYPE_LABELS["mikrotik_netmap"],
+        )
     if source == "expanded_mapping_table":
-        return parse_expanded_mapping_table(content)
+        return with_a10_fixed_nat_hint(
+            parse_expanded_mapping_table(content),
+            content,
+            CGNAT_SOURCE_TYPE_LABELS["expanded_mapping_table"],
+        )
     if source == "ai":
         return deterministic_payload("unknown", [], notes=["Modo IA nao possui parser deterministico."])
     if source in {"auto", "unknown"}:
@@ -1489,7 +1533,7 @@ def parse_known_cgnat_text(content: str, source_hint: Any = None) -> dict[str, A
                 )
     if not records:
         notes.append("Nenhum registro reconhecido pelo parser deterministico.")
-    return {
+    result = {
         "source_type": source,
         "device_name": device_name,
         "pool_name": pool_name,
@@ -1497,6 +1541,9 @@ def parse_known_cgnat_text(content: str, source_hint: Any = None) -> dict[str, A
         "notes": notes,
         "records": records,
     }
+    if source != "a10":
+        result = with_a10_fixed_nat_hint(result, content, cgnat_source_type_label(source))
+    return result
 
 
 def normalize_record(record: dict[str, Any], default_pool: Any = None, default_device: Any = None) -> dict[str, Any]:
@@ -2789,7 +2836,9 @@ __all__ = [
     "CGNAT_POOL_MODES",
     "CGNAT_PROTOCOLS",
     "CGNAT_SOURCE_MODES",
+    "CGNAT_SOURCE_TYPE_LABELS",
     "CGNAT_SOURCE_TYPES",
+    "a10_fixed_nat_signature",
     "activate_cgnat_batch",
     "approve_cgnat_batch",
     "batch_to_dict",
@@ -2797,6 +2846,7 @@ __all__ = [
     "cgnat_pool_evidence",
     "cgnat_pool_match",
     "cgnat_pool_overlap_context",
+    "cgnat_source_type_label",
     "cgnat_upload_limits",
     "consolidate_cgnat_chunks",
     "create_cgnat_import_batch",
@@ -2821,4 +2871,5 @@ __all__ = [
     "store_cgnat_preview",
     "update_cgnat_pool",
     "validate_cgnat_records",
+    "with_a10_fixed_nat_hint",
 ]

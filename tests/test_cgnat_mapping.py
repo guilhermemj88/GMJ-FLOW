@@ -12,6 +12,7 @@ from tests.test_collector_apply_static import backend_main
 from app.services.cgnat_mapping import (
     CGNAT_AI_SYSTEM_PROMPT,
     CGNAT_TEXT_EXTENSIONS,
+    a10_fixed_nat_signature,
     activate_cgnat_batch,
     approve_cgnat_batch,
     build_cgnat_ai_prompt,
@@ -69,6 +70,7 @@ subscriber-id=assinante-42
 """
 NETMAP_FIXTURE = (ROOT / "tests" / "fixtures" / "cgnat" / "mikrotik-routeros-netmap.export").read_text(encoding="utf-8")
 EXPANDED_TABLE_FIXTURE = (ROOT / "tests" / "fixtures" / "cgnat" / "expanded-mapping-table.txt").read_text(encoding="utf-8")
+A10_FIXED_NAT_FIXTURE = (ROOT / "tests" / "fixtures" / "cgnat" / "a10-fixed-nat-native.txt").read_text(encoding="utf-8")
 
 
 def memory_db():
@@ -933,9 +935,9 @@ class CgnatMikrotikNetmapTest(unittest.TestCase):
     def test_frontend_exposes_all_explicit_modes_and_never_uses_null_source_type(self):
         for marker in (
             'value="auto">Detectar automaticamente',
+            'value="a10">A10 Fixed NAT (NAT Address / Inside User / Port Range)',
             'value="mikrotik_netmap">MikroTik RouterOS NETMAP',
-            'value="expanded_mapping_table">Tabela expandida',
-            'value="a10">A10',
+            'value="expanded_mapping_table">Tabela expandida em colunas',
             'value="generic">Genérico',
             'value="ai">Interpretar com IA local',
             "source_type: selectValue('cgnatSourceType') || 'auto'",
@@ -1522,6 +1524,98 @@ class CgnatBatchDeleteTest(unittest.TestCase):
         )
         self.assertIn("await apiRequest(`/api/cgnat/imports/${batchId}`, { method: 'DELETE' });", FRONTEND)
         self.assertIn("showGmjToast(`Lote #${batchId} excluído.`);", FRONTEND)
+
+
+class CgnatA10FixedNatRegressionTest(unittest.TestCase):
+    """Regressão: exports nativos A10 Fixed NAT (NAT Address / Inside User / Port Range)."""
+
+    def test_native_a10_is_recognized_in_auto_and_explicit_modes(self):
+        for hint in (None, "auto", "unknown", "a10"):
+            with self.subTest(hint=hint):
+                parsed = parse_known_cgnat_text(A10_FIXED_NAT_FIXTURE, hint)
+                self.assertEqual(parsed["source_type"], "a10")
+                self.assertEqual(len(parsed["records"]), 8)
+                self.assertEqual(parsed["notes"], [])
+                self.assertEqual(parsed["records"][0]["public_ip"], "203.0.113.32")
+                self.assertEqual(parsed["records"][-1]["public_ip"], "203.0.113.99")
+
+    def test_native_a10_preserves_public_private_and_port_ranges(self):
+        parsed = parse_known_cgnat_text(A10_FIXED_NAT_FIXTURE, "a10")
+        first = parsed["records"][0]
+        self.assertEqual(first["public_ip"], "203.0.113.32")
+        self.assertEqual(first["private_ip"], "100.97.0.0")
+        self.assertEqual((first["port_start"], first["port_end"]), (1024, 2031))
+        self.assertEqual(first["protocol"], "any")
+        last = parsed["records"][-1]
+        self.assertEqual(last["public_ip"], "203.0.113.99")
+        self.assertEqual(last["private_ip"], "100.97.9.10")
+        self.assertEqual((last["port_start"], last["port_end"]), (4000, 5000))
+
+    def test_native_a10_block_sizes_come_from_the_file(self):
+        parsed = parse_known_cgnat_text(A10_FIXED_NAT_FIXTURE, "a10")
+        sizes = sorted({item["port_end"] - item["port_start"] + 1 for item in parsed["records"]})
+        self.assertEqual(sizes, [1001, 1008, 2016])
+
+    def test_wrong_expanded_parser_receives_a10_mismatch_hint(self):
+        parsed = parse_known_cgnat_text(A10_FIXED_NAT_FIXTURE, "expanded_mapping_table")
+        self.assertEqual(parsed["records"], [])
+        notes = " ".join(parsed["notes"])
+        self.assertIn("parece ser um export A10 Fixed NAT", notes)
+        self.assertIn("Selecione o formato A10 e reprocesse.", notes)
+
+    def test_wrong_mikrotik_parser_receives_a10_mismatch_hint(self):
+        parsed = parse_known_cgnat_text(A10_FIXED_NAT_FIXTURE, "mikrotik_netmap")
+        self.assertIn("parece ser um export A10 Fixed NAT", " ".join(parsed["notes"]))
+
+    def test_a10_fixed_nat_signature_ignores_other_formats(self):
+        self.assertTrue(a10_fixed_nat_signature(A10_FIXED_NAT_FIXTURE))
+        self.assertTrue(a10_fixed_nat_signature(A10_NATIVE_CONTENT))
+        self.assertFalse(a10_fixed_nat_signature(EXPANDED_TABLE_FIXTURE))
+        self.assertFalse(a10_fixed_nat_signature(NETMAP_FIXTURE))
+
+    def test_mismatched_selection_returns_actionable_error_from_interpret(self):
+        conn = memory_db()
+        batch = create_cgnat_import_batch(
+            conn,
+            filename="fixed_nat_ip_list_POOL-OUTSIDE-02_2025_11_17_220817",
+            content=A10_FIXED_NAT_FIXTURE,
+            source_type_confirmed="expanded_mapping_table",
+        )
+        with self.assertRaises(ValueError) as ctx:
+            backend_main.interpret_cgnat_import_batch(conn, batch["id"], source_type="expanded_mapping_table")
+        message = str(ctx.exception)
+        self.assertIn("expanded_mapping_table_parse_failed", message)
+        self.assertIn("parece ser um export A10 Fixed NAT", message)
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM cgnat_port_mappings").fetchone()[0], 0)
+        conn.close()
+
+    def test_reprocess_with_auto_recovers_batch_uploaded_with_wrong_type(self):
+        conn = memory_db()
+        batch = create_cgnat_import_batch(
+            conn,
+            filename="fixed_nat_ip_list_POOL-OUTSIDE_2025_11_17_220817",
+            content=A10_FIXED_NAT_FIXTURE,
+            source_type_confirmed="expanded_mapping_table",
+        )
+        preview = backend_main.interpret_cgnat_import_batch(conn, batch["id"], source_type="auto")
+        self.assertEqual(preview["source_type_detected"], "a10")
+        self.assertEqual(preview["status"], "awaiting_approval")
+        self.assertEqual(preview["valid_rows"], 8)
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM cgnat_port_mappings").fetchone()[0], 0)
+        conn.close()
+
+    def test_upload_selecting_a10_reaches_preview_with_every_mapping(self):
+        conn = memory_db()
+        preview = create_preview(
+            conn,
+            A10_FIXED_NAT_FIXTURE,
+            filename="fixed_nat_ip_list_POOL-OUTSIDE_2025_11_17_220817 (5)",
+            source_type="a10",
+        )
+        self.assertEqual(preview["source_type_detected"], "a10")
+        self.assertEqual(preview["status"], "awaiting_approval")
+        self.assertEqual(preview["valid_rows"], 8)
+        conn.close()
 
 
 if __name__ == "__main__":
