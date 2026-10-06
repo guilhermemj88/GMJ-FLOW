@@ -37258,7 +37258,9 @@ def detection_lease_ttl_seconds() -> int:
 
 
 def detection_worker_identity() -> str:
-    return f"{socket.gethostname()}:{os.getpid()}"
+    """Identidade auto-descritiva do dono do detector: `api@host:pid` ou `detector@host:pid`."""
+    role = "detector" if detection_worker_enabled() else "api"
+    return f"{role}@{socket.gethostname()}:{os.getpid()}"
 
 
 def _detection_ensure_runtime_tables(conn: sqlite3.Connection) -> None:

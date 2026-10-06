@@ -189,6 +189,8 @@ services:
     image: gmj-flow-backend:latest
     container_name: gmj-flow-detector
     restart: unless-stopped
+    # Permite o ciclo em andamento terminar no shutdown (SIGTERM) sem SIGKILL.
+    stop_grace_period: 70s
     command: ["python", "-m", "app.detection_worker"]
     environment:
       CLICKHOUSE_HOST: clickhouse
@@ -206,7 +208,7 @@ services:
       GMJFLOW_DETECTION_WORKER_ENABLED: "true"
       GMJFLOW_DETECTION_INPROCESS_ENABLED: "false"
       GMJFLOW_DETECTION_WORKER_PORT: "${GMJFLOW_DETECTION_WORKER_PORT-8090}"
-      GMJFLOW_DETECTION_LEASE_TTL_SECONDS: "${GMJFLOW_DETECTION_LEASE_TTL_SECONDS-120}"
+      GMJFLOW_DETECTION_LEASE_TTL_SECONDS: "${GMJFLOW_DETECTION_LEASE_TTL_SECONDS-60}"
       GMJFLOW_DETECTION_RECONCILE_ENABLED: "${GMJFLOW_DETECTION_RECONCILE_ENABLED-false}"
       GMJFLOW_DETECTION_WATERMARK_SECONDS: "${GMJFLOW_DETECTION_WATERMARK_SECONDS-240}"
       GMJFLOW_DETECTION_RECONCILE_MAX_BUCKETS: "${GMJFLOW_DETECTION_RECONCILE_MAX_BUCKETS-6}"

@@ -496,3 +496,123 @@ janelas diferentes sem mudança estrutural.
   tabela `detection_cursor` pode ficar (inofensiva) ou ser removida.
 - Nenhuma migration de dados; nenhum threshold alterado; nenhuma anomalia apagada.
 
+---
+
+## 16. PERF-C.0 — detector isolado do processo da API (deployado 2026-10-06)
+
+### 16.1 Arquitetura anterior (API + detector no mesmo processo)
+
+```text
+uvicorn (API) = HTTP/UI + SNMP + BGP + ASN + threat intel + behavioral + media + DETECTOR (thread)
+```
+
+O detector nascia em `@app.on_event("startup")` → `start_anomaly_detection_thread()` →
+`anomaly_detection_loop()` → `detect_anomalies_once()`, como **thread** dentro do processo da
+API. Causa comprovada da contenção (§10.3): o mesmo passo medido isolado = **42 s**; dentro da
+API = **90–238 s** — os ~140 s extras são espera de GIL/CPU com as outras 10+ threads.
+
+### 16.2 Arquitetura nova
+
+```text
+gmj-flow-backend   (uvicorn)                          = HTTP/API/UI + demais workers, SEM detector
+gmj-flow-detector  (python -m app.detection_worker)   = SOMENTE detector (mesma imagem)
+```
+
+- **Mesma imagem** `gmj-flow-backend:latest`, entrypoint diferente (`backend/app/detection_worker.py`).
+- O worker NÃO sobe FastAPI nem nenhum outro worker; sobe um HTTP mínimo com `/health` e
+  `/status` na porta 8090 (usado pelo healthcheck do container).
+- `docker-compose.yml`: novo serviço `detector` com `image: gmj-flow-backend:latest` (sem build
+  próprio), `stop_grace_period: 70s` e os mesmos volumes de dados/repo/docker.sock/exabgp.
+
+### 16.3 Garantia de UM ÚNICO detector
+
+| Mecanismo | Como funciona |
+|---|---|
+| `GMJFLOW_DETECTION_INPROCESS_ENABLED` | a API só inicia o detector embutido se `true`; no compose o default virou **`false`** |
+| `GMJFLOW_DETECTION_WORKER_ENABLED` | o entrypoint do worker exige `true` (senão encerra) |
+| Lease em SQLite (`detection_worker_lease`) | `BEGIN IMMEDIATE` + `expires_at`; o worker renova por heartbeat (TTL 60 s, batida a cada 20 s) e **só roda se for o dono** |
+| `/api/detection/run-now` | responde **409** se outro processo detém o lease vivo |
+
+Validado em container real: um segundo worker apontando para o mesmo banco ficou em
+`lease do detector detido por detector@…; aguardando` e **não executou nenhum ciclo**.
+
+### 16.4 Status compartilhado (não depende da memória do processo)
+
+- O worker publica o status em `detection_runtime_state(key='scheduler_status')` (mesmo
+  payload do `DETECTION_SCHEDULER_STATUS`).
+- `GET /api/detection/status` lê essa fonte quando a API não roda o detector e devolve:
+  `status_source` (`worker`/`inprocess`/`none`), `status_age_seconds`, `owner`
+  (`detector@host:pid`), `worker_lease`, além de todos os campos já existentes
+  (`cycle_duration_seconds`, `queries_last_cycle`, `scan_cache_hits/misses`,
+  `buckets_processed/pending`, `last_evaluated_until`, `watermark_at`, `detector_lag_seconds`).
+
+### 16.5 SQLite entre dois processos
+
+- Mesmo arquivo (`./data/backend/gmjflow.db`), WAL + `busy_timeout=30000` (já existentes em
+  `sqlite_connection()`); lease com `BEGIN IMMEDIATE` para serializar entre processos.
+- **Teste executado**: lock de escrita mantido por 12 s → o worker **não** registrou
+  `SQLITE_BUSY`/`database is locked` (esperou e seguiu).
+- Schema: apenas duas tabelas novas de runtime (`detection_worker_lease`,
+  `detection_runtime_state`), criadas de forma idempotente. Nada de dados.
+
+### 16.6 Testes
+
+**12 unitários** (`tests/test_detection_worker_isolation.py`): in-process on/off, worker flag,
+lease exclusivo, expiração/takeover, release (e release de outro), status do worker/none,
+lease vivo ⇒ `scheduler_running`, run-now 409/ok.
+
+**Operacionais**: shutdown limpo (SIGTERM → `encerrando` + lease liberado), restart do worker
+(takeover imediato no boot), restart da API (detector **não** reinicia nem dobra), segundo
+worker recusado, **ClickHouse indisponível** (7 ciclos falharam sem derrubar o worker), lock
+de SQLite.
+
+### 16.7 Benchmark antes/depois (runtime real)
+
+| Métrica | ANTES (detector na API) | DEPOIS (detector isolado) |
+|---|---|---|
+| passo de regras (wall) | 89,7 s · 196,8 s · **238 s** | **38,8 s** |
+| ciclo completo (wall) | ~193 s+ (pré-PERF-A; inflado pela contenção) | **51,8 / 56,1 / 56,4 s** |
+| ClickHouse do passo | 22–29 s | 22–29 s (inalterado) |
+| CPU API | ~102–140% | ~104% (sem o detector) |
+| CPU detector | — | 20–90% (0,2–0,9 core) |
+| CPU ClickHouse | 160–523% | 70–340% |
+| Ingestão | 2,4–3,5 k rows/s | **1,6–3,1 k rows/s (média ~2,4 k, sem degradação)** |
+| Load host (16 vCPU) | 7,3 | 4,8–6,4 |
+| Anomalias | estável | estável (0 erros nos ciclos) |
+
+**Critério de aceite:** detector consistente < 60 s ✅ (38,8 s no passo; 52–56 s no ciclo
+completo), API responsiva ✅, ingestão sem degradação ✅, sem SQLite locks ✅, mesmas
+regras/candidatos ✅ (28 regras, 168 queries, 42 cache hits).
+
+### 16.8 PERF-B após o isolamento
+
+**Não ativado** neste deploy (`GMJFLOW_DETECTION_RECONCILE_ENABLED=false` no serviço
+`detector`). Próximo passo: ligar e medir o custo adicional (queries, `buckets_pending`,
+`detector_lag_seconds`, CPU, ingestão) por ≥3 ciclos.
+
+### 16.9 Limitação registrada: latência de export do exporter
+
+`flow_time = flow_start`, `flow_end` NULL, `duration_ms = 0`, `received_at` = inserção;
+lag p50 25 s / p95 125 s / p99 250–333 s. **Mesmo um detector instantâneo não detecta antes
+do flow ser exportado.** A meta futura de 10–30 s exigirá avaliar `active timeout`/
+`inactive timeout` dos exporters (NetFlow/IPFIX) — **não mexer nesta fase**.
+
+### 16.10 Rollback (PERF-C.0)
+
+```bash
+cd /home/guilherme/GMJ-FLOW
+cp docker-compose.yml.bak-pre-perf-c0-20261006 docker-compose.yml
+docker compose up -d --no-deps backend     # volta o detector para dentro da API (default true)
+docker stop gmj-flow-detector              # (opcional) docker rm gmj-flow-detector
+# imagem: docker tag gmj-flow-backend:deploy-e70af02 gmj-flow-backend:latest
+```
+
+As tabelas `detection_worker_lease`/`detection_runtime_state` podem permanecer (inofensivas).
+
+### 16.11 Próximo passo — PERF-C.1
+
+Depois de ≥3 ciclos estáveis isolados: testar **2 workers de query** (máx 4) por execution
+group (template/janela), usando o cursor por `(template, window_seconds)` do PERF-B para não
+processar o mesmo bucket duas vezes. Medir CPU do ClickHouse, latência das queries e ingestão.
+Só se o isolamento não bastar, avaliar CPU limits/cpuset/nice (não aplicados ainda).
+

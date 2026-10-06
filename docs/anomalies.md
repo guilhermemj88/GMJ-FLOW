@@ -144,6 +144,24 @@ Detalhes, medicao completa, prova de equivalencia, cursor/watermark (PERF-B) e p
   `duration_ms` sao sempre nulos. Por isso o FAST e a reconciliacao usam `flow_time`
   (mesmo bucket) e `received_at` fica apenas como metrica de lag de ingestao.
 
+### Detector isolado da API (PERF-C.0)
+
+O worker de `detection_template_rules` deixou de rodar como thread dentro da API e passou a
+rodar em processo/container proprio (`gmj-flow-detector`, mesma imagem, entrypoint
+`python -m app.detection_worker`). Motivo medido: o mesmo passo levava ~42 s isolado e
+90-238 s dentro da API por contencao de GIL/CPU com as outras threads.
+
+- **Um unico dono:** `GMJFLOW_DETECTION_INPROCESS_ENABLED=false` na API (default no compose)
+  + `GMJFLOW_DETECTION_WORKER_ENABLED=true` no worker + lease em SQLite
+  (`detection_worker_lease`, heartbeat/expira em 60 s). Um segundo worker no mesmo banco nao
+  executa. `POST /api/detection/run-now` responde 409 se outro processo tem o lease.
+- **Status:** o worker publica o status em `detection_runtime_state`; `GET /api/detection/status`
+  continua funcionando e informa `status_source` (`worker`), `owner` e `status_age_seconds`.
+- **Resultado:** ciclo completo caiu para 52-56 s (passo de regras 38,8 s), CPU do ClickHouse
+  70-340% (antes 160-523%), ingestao estavel (~2,4 k rows/s), sem SQLite locks.
+- **Rollback:** restaurar `docker-compose.yml.bak-pre-perf-c0-20261006`, `docker compose up -d
+  --no-deps backend` e `docker stop gmj-flow-detector`.
+
 ## Teste de vetor
 
 Na tela **Vetores de Ataque**, cada linha possui o botao **Testar agora**. O botao executa imediatamente o vetor nos ultimos 60 segundos e abre um modal com:

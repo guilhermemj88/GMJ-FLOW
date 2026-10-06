@@ -29,7 +29,7 @@ from app import main as backend
 logger = logging.getLogger("gmj-flow-detector")
 logging.basicConfig(level=os.getenv("GMJFLOW_DETECTOR_LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(message)s")
 
-OWNER = f"detector@{backend.detection_worker_identity()}"
+OWNER = backend.detection_worker_identity()
 STOP = threading.Event()
 STATE: dict[str, object] = {
     "started_at": backend.utc_now_iso(),
@@ -105,6 +105,11 @@ def _install_signal_handlers() -> None:
     def _stop(signum, frame):  # noqa: ARG001
         logger.info("sinal %s recebido; encerrando", signum)
         STOP.set()
+        # Libera o lease imediatamente para o proximo worker assumir sem esperar o
+        # TTL (o ciclo em andamento pode ser interrompido pelo grace period do docker).
+        if STATE["holding_lease"]:
+            backend.detection_lease_release(OWNER)
+            STATE["holding_lease"] = False
 
     for sig in (signal.SIGTERM, signal.SIGINT):
         try:
@@ -135,6 +140,14 @@ def main() -> int:
     )
     threading.Thread(target=_heartbeat_loop, name="gmj-flow-detector-heartbeat", daemon=True).start()
 
+    # Adquire o lease JA no boot (takeover imediato quando o anterior morreu).
+    if backend.detection_lease_acquire(OWNER, ttl):
+        STATE["holding_lease"] = True
+        logger.info("lease do detector adquirido por %s", OWNER)
+    else:
+        lease = backend.detection_lease_info() or {}
+        logger.warning("lease do detector detido por %s; aguardando no loop", lease.get("owner"))
+
     interval = backend.detection_scheduler_interval_seconds()
     while not STOP.wait(interval):
         if not STATE["holding_lease"]:
@@ -149,10 +162,12 @@ def main() -> int:
         STATE["last_cycle_started_at"] = backend.utc_now_iso()
         try:
             result = backend.detect_anomalies_once()
-            STATE["last_error"] = ""
+            inner_errors = [str(item) for item in ((result or {}).get("errors") or [])]
+            STATE["last_error"] = "; ".join(inner_errors)[:400]
             STATE["status"] = {
                 "templates": (result or {}).get("template_detection", {}).get("scan_cache"),
                 "rules_evaluated": (result or {}).get("template_detection", {}).get("rules_evaluated"),
+                "errors": inner_errors,
             }
         except Exception as exc:  # pragma: no cover - resiliencia do worker
             STATE["last_error"] = backend.clean_text(exc)
