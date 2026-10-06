@@ -24,6 +24,11 @@ CGNAT_IMPORT_STATUSES = {
     "rejected",
     "failed",
 }
+# Lotes terminais que podem ser excluidos definitivamente pelo operador.
+CGNAT_BATCH_DELETABLE_STATUSES = {"rejected", "failed", "validation_failed"}
+# Status que NAO bloqueiam o dedupe por hash no upload: reenviar o mesmo arquivo
+# cria um novo lote (esses lotes nao podem ser reprocessados/aprovados in-place).
+CGNAT_BATCH_NON_BLOCKING_DEDUPE_STATUSES = {"rejected", "superseded"}
 CGNAT_SOURCE_MODES = (
     "auto",
     "mikrotik_netmap",
@@ -589,9 +594,17 @@ def create_cgnat_import_batch(
 ) -> dict[str, Any]:
     ensure_cgnat_schema(conn)
     upload = validate_upload_content(filename, content, mime_type)
+    blocking_statuses = sorted(CGNAT_IMPORT_STATUSES - CGNAT_BATCH_NON_BLOCKING_DEDUPE_STATUSES)
+    placeholders = ", ".join("?" for _ in blocking_statuses)
     duplicate = conn.execute(
-        "SELECT * FROM cgnat_import_batches WHERE file_hash = ? ORDER BY id DESC LIMIT 1",
-        (upload["file_hash"],),
+        f"""
+        SELECT *
+        FROM cgnat_import_batches
+        WHERE file_hash = ? AND status IN ({placeholders})
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (upload["file_hash"], *blocking_statuses),
     ).fetchone()
     if duplicate is not None:
         result = batch_to_dict(duplicate)
@@ -2232,6 +2245,47 @@ def reject_cgnat_batch(conn: sqlite3.Connection, batch_id: int, actor: str = "")
     return batch_to_dict(updated)
 
 
+def delete_cgnat_batch(conn: sqlite3.Connection, batch_id: int) -> dict[str, Any]:
+    """Exclusao definitiva de lotes terminais (rejected/failed/validation_failed).
+
+    Remove o lote e tudo que pertence exclusivamente a ele (mapeamentos e linhas
+    importadas) em transacao unica, liberando o hash para um novo upload. Lotes
+    ativos ou com mapeamento ativo sao recusados.
+    """
+    ensure_cgnat_schema(conn)
+    batch = conn.execute("SELECT * FROM cgnat_import_batches WHERE id = ?", (int(batch_id),)).fetchone()
+    if batch is None:
+        raise ValueError("batch_not_found")
+    status = clean_text(batch["status"])
+    if status == "active":
+        raise ValueError("active_batch_cannot_be_deleted")
+    if status not in CGNAT_BATCH_DELETABLE_STATUSES:
+        raise ValueError("batch_status_not_deletable")
+    active_mappings = conn.execute(
+        "SELECT COUNT(*) AS count FROM cgnat_port_mappings WHERE batch_id = ? AND active = 1",
+        (int(batch_id),),
+    ).fetchone()["count"]
+    if active_mappings:
+        raise ValueError("batch_has_active_mappings")
+    removed_mappings = conn.execute(
+        "DELETE FROM cgnat_port_mappings WHERE batch_id = ?", (int(batch_id),)
+    ).rowcount
+    removed_rows = conn.execute(
+        "DELETE FROM cgnat_import_rows WHERE batch_id = ?", (int(batch_id),)
+    ).rowcount
+    conn.execute("DELETE FROM cgnat_import_batches WHERE id = ?", (int(batch_id),))
+    return {
+        "deleted": True,
+        "batch_id": int(batch_id),
+        "filename": clean_text(batch["original_filename"]) or clean_text(batch["filename"]),
+        "file_hash": clean_text(batch["file_hash"]),
+        "old_status": status,
+        "removed_rows": int(removed_rows or 0),
+        "removed_mappings": int(removed_mappings or 0),
+        "deleted_at": utc_now_iso(),
+    }
+
+
 def active_public_ip_exists(
     conn: sqlite3.Connection,
     public_ip: str,
@@ -2729,6 +2783,8 @@ __all__ = [
     "CGNAT_AI_PROMPT_VERSION",
     "CGNAT_AI_SCHEMA",
     "CGNAT_AI_SYSTEM_PROMPT",
+    "CGNAT_BATCH_DELETABLE_STATUSES",
+    "CGNAT_BATCH_NON_BLOCKING_DEDUPE_STATUSES",
     "CGNAT_IMPORT_STATUSES",
     "CGNAT_POOL_MODES",
     "CGNAT_PROTOCOLS",
@@ -2746,6 +2802,7 @@ __all__ = [
     "create_cgnat_import_batch",
     "create_cgnat_pool",
     "deactivate_cgnat_batch",
+    "delete_cgnat_batch",
     "delete_cgnat_pool",
     "ensure_cgnat_schema",
     "get_cgnat_batch",

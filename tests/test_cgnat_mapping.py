@@ -17,6 +17,7 @@ from app.services.cgnat_mapping import (
     build_cgnat_ai_prompt,
     create_cgnat_import_batch,
     deactivate_cgnat_batch,
+    delete_cgnat_batch,
     ensure_cgnat_schema,
     get_cgnat_batch,
     is_safe_text_upload,
@@ -1312,6 +1313,215 @@ class GrafanaMitigationDatabaseContractTest(unittest.TestCase):
                 )
                 self.assertEqual(total, 3)
                 self.assertEqual(len(page), 1)
+
+
+SUPERSEDE_CONTENT = """private-address=100.64.9.1
+public-address=45.5.248.199
+port-start=25000
+port-end=26000
+protocol=any
+pool-name=POOL-MT
+"""
+
+
+class CgnatBatchDeleteTest(unittest.TestCase):
+    """Exclusao de lotes terminais + reupload do mesmo arquivo (Fase CGNAT delete)."""
+
+    def setUp(self):
+        self.conn = memory_db()
+
+    def tearDown(self):
+        self.conn.close()
+
+    def _delete_error(self, batch_id):
+        with self.assertRaises(ValueError) as ctx:
+            delete_cgnat_batch(self.conn, batch_id)
+        return str(ctx.exception)
+
+    def _row_count(self, table, batch_id):
+        return self.conn.execute(
+            f"SELECT COUNT(*) AS count FROM {table} WHERE batch_id = ?", (batch_id,)
+        ).fetchone()["count"]
+
+    def _batch_status(self, batch_id):
+        row = self.conn.execute(
+            "SELECT status FROM cgnat_import_batches WHERE id = ?", (batch_id,)
+        ).fetchone()
+        return row["status"] if row else None
+
+    def test_rejected_batch_can_be_deleted_with_children(self):
+        preview = create_preview(self.conn, A10_CONTENT, filename="rej.txt", source_type="a10")
+        reject_cgnat_batch(self.conn, preview["id"], "operador")
+        rows_before = self._row_count("cgnat_import_rows", preview["id"])
+        self.assertGreater(rows_before, 0)
+
+        result = delete_cgnat_batch(self.conn, preview["id"])
+
+        self.assertTrue(result["deleted"])
+        self.assertEqual(result["old_status"], "rejected")
+        self.assertEqual(result["removed_rows"], rows_before)
+        self.assertEqual(result["filename"], "rej.txt")
+        self.assertTrue(result["file_hash"])
+        self.assertIsNone(self._batch_status(preview["id"]))
+        self.assertEqual(self._row_count("cgnat_import_rows", preview["id"]), 0)
+
+    def test_failed_and_validation_failed_batches_can_be_deleted(self):
+        failed = create_cgnat_import_batch(
+            self.conn, filename="f.txt", content=A10_CONTENT, source_type_confirmed="a10", actor="t"
+        )
+        self.conn.execute("UPDATE cgnat_import_batches SET status = 'failed' WHERE id = ?", (failed["id"],))
+        deleted = delete_cgnat_batch(self.conn, failed["id"])
+        self.assertEqual(deleted["old_status"], "failed")
+
+        invalids = create_cgnat_import_batch(
+            self.conn, filename="v.txt", content="conteudo sem formato reconhecido\n", source_type_confirmed="other", actor="t"
+        )
+        store_cgnat_preview(self.conn, invalids["id"], parse_known_cgnat_text("conteudo sem formato reconhecido\n", "other"))
+        self.assertEqual(self._batch_status(invalids["id"]), "validation_failed")
+        self.assertTrue(delete_cgnat_batch(self.conn, invalids["id"])["deleted"])
+
+    def test_active_batch_delete_is_blocked(self):
+        batch_id = activate_preview(self.conn, MIKROTIK_CONTENT, filename="act.txt")
+        self.assertEqual(self._batch_status(batch_id), "active")
+
+        self.assertEqual(self._delete_error(batch_id), "active_batch_cannot_be_deleted")
+        self.assertEqual(
+            backend_main.cgnat_http_error(ValueError("active_batch_cannot_be_deleted")).status_code, 409
+        )
+        self.assertEqual(self._batch_status(batch_id), "active")
+        self.assertGreater(self._row_count("cgnat_port_mappings", batch_id), 0)
+
+    def test_approved_batch_delete_is_blocked(self):
+        preview = create_preview(self.conn, MIKROTIK_CONTENT, filename="apr.txt")
+        approve_cgnat_batch(self.conn, preview["id"], "operador")
+        self.assertEqual(self._delete_error(preview["id"]), "batch_status_not_deletable")
+        self.assertEqual(
+            backend_main.cgnat_http_error(ValueError("batch_status_not_deletable")).status_code, 409
+        )
+
+    def test_superseded_batch_delete_is_blocked_but_reupload_is_not(self):
+        first_id = activate_preview(self.conn, MIKROTIK_CONTENT, filename="s1.txt")
+        activate_preview(self.conn, SUPERSEDE_CONTENT, filename="s2.txt", replace=True)
+        self.assertEqual(self._batch_status(first_id), "superseded")
+        self.assertEqual(self._delete_error(first_id), "batch_status_not_deletable")
+
+        again = create_cgnat_import_batch(
+            self.conn, filename="s1.txt", content=MIKROTIK_CONTENT, source_type_confirmed="generic", actor="t"
+        )
+        self.assertTrue(again["created"])
+        self.assertNotEqual(again["id"], first_id)
+
+    def test_batch_with_active_mappings_cannot_be_deleted(self):
+        batch_id = activate_preview(self.conn, MIKROTIK_CONTENT, filename="guard.txt")
+        self.conn.execute("UPDATE cgnat_import_batches SET status = 'rejected' WHERE id = ?", (batch_id,))
+        self.assertEqual(self._delete_error(batch_id), "batch_has_active_mappings")
+        self.assertEqual(
+            backend_main.cgnat_http_error(ValueError("batch_has_active_mappings")).status_code, 409
+        )
+
+    def test_delete_missing_batch_is_404(self):
+        self.assertEqual(self._delete_error(424242), "batch_not_found")
+        self.assertEqual(backend_main.cgnat_http_error(ValueError("batch_not_found")).status_code, 404)
+
+    def test_delete_does_not_touch_other_batches(self):
+        keep = create_preview(self.conn, MIKROTIK_CONTENT, filename="keep.txt")
+        gone = create_preview(self.conn, A10_CONTENT, filename="gone.txt", source_type="a10")
+        reject_cgnat_batch(self.conn, gone["id"], "operador")
+
+        delete_cgnat_batch(self.conn, gone["id"])
+
+        self.assertEqual(self._batch_status(keep["id"]), "awaiting_approval")
+        self.assertGreater(self._row_count("cgnat_import_rows", keep["id"]), 0)
+        self.assertEqual(self._row_count("cgnat_import_rows", gone["id"]), 0)
+
+    def test_delete_removes_inactive_mappings_of_approved_then_rejected_batch(self):
+        preview = create_preview(self.conn, MIKROTIK_CONTENT, filename="map.txt")
+        approve_cgnat_batch(self.conn, preview["id"], "operador")
+        mappings_before = self._row_count("cgnat_port_mappings", preview["id"])
+        self.assertGreater(mappings_before, 0)
+
+        reject_cgnat_batch(self.conn, preview["id"], "operador")
+        result = delete_cgnat_batch(self.conn, preview["id"])
+
+        self.assertEqual(result["removed_mappings"], mappings_before)
+        self.assertEqual(self._row_count("cgnat_port_mappings", preview["id"]), 0)
+        self.assertIsNone(self._batch_status(preview["id"]))
+
+    def test_rejected_reupload_creates_new_batch_without_delete(self):
+        first = create_preview(self.conn, A10_CONTENT, filename="same.txt", source_type="a10")
+        reject_cgnat_batch(self.conn, first["id"], "operador")
+
+        again = create_cgnat_import_batch(
+            self.conn, filename="same.txt", content=A10_CONTENT, source_type_confirmed="a10", actor="t"
+        )
+
+        self.assertTrue(again["created"])
+        self.assertFalse(again["duplicate_file"])
+        self.assertNotEqual(again["id"], first["id"])
+
+    def test_reupload_same_file_after_delete_reaches_active(self):
+        first = create_preview(self.conn, MIKROTIK_CONTENT, filename="cycle.txt")
+        reject_cgnat_batch(self.conn, first["id"], "operador")
+        delete_cgnat_batch(self.conn, first["id"])
+
+        again = create_cgnat_import_batch(
+            self.conn, filename="cycle.txt", content=MIKROTIK_CONTENT, source_type_confirmed="generic", actor="t"
+        )
+        self.assertTrue(again["created"])
+        store_cgnat_preview(self.conn, again["id"], parse_known_cgnat_text(MIKROTIK_CONTENT))
+        approve_cgnat_batch(self.conn, again["id"], "operador")
+        activated = activate_cgnat_batch(self.conn, again["id"])
+        self.assertEqual(activated["status"], "active")
+
+    def test_failed_delete_then_same_file_reupload(self):
+        failed = create_cgnat_import_batch(
+            self.conn, filename="fx.txt", content=A10_CONTENT, source_type_confirmed="a10", actor="t"
+        )
+        self.conn.execute("UPDATE cgnat_import_batches SET status = 'failed' WHERE id = ?", (failed["id"],))
+        delete_cgnat_batch(self.conn, failed["id"])
+
+        again = create_cgnat_import_batch(
+            self.conn, filename="fx.txt", content=A10_CONTENT, source_type_confirmed="a10", actor="t"
+        )
+        self.assertTrue(again["created"])
+
+    def test_active_hash_still_blocks_duplicate_upload(self):
+        active_id = activate_preview(self.conn, MIKROTIK_CONTENT, filename="hash.txt")
+
+        duplicate = create_cgnat_import_batch(
+            self.conn, filename="hash.txt", content=MIKROTIK_CONTENT, source_type_confirmed="generic", actor="t"
+        )
+
+        self.assertFalse(duplicate["created"])
+        self.assertTrue(duplicate["duplicate_file"])
+        self.assertEqual(int(duplicate["existing_batch_id"]), int(active_id))
+
+    def test_delete_route_registered_with_admin_guard(self):
+        source = (ROOT / "backend" / "app" / "main.py").read_text(encoding="utf-8")
+        self.assertIn('@app.delete("/api/cgnat/imports/{batch_id}")', source)
+        block = source.split('@app.delete("/api/cgnat/imports/{batch_id}")', 1)[1].split('@app.get("/api/cgnat/imports/{batch_id}/errors.csv")', 1)[0]
+        self.assertIn("def cgnat_import_delete(request: Request, batch_id: int):", block)
+        self.assertIn("require_admin(request)", block)
+        self.assertIn("delete_cgnat_batch(conn, batch_id)", block)
+        self.assertIn("audit_request_action", block)
+        self.assertIn('"cgnat.batch.deleted"', block)
+
+    def test_frontend_exposes_delete_action_and_confirmation_modal(self):
+        self.assertIn("['rejected', 'failed', 'validation_failed'].includes(status)", FRONTEND)
+        self.assertIn('data-action="delete"', FRONTEND)
+        self.assertIn('id="cgnatDeleteModal"', FRONTEND)
+        self.assertIn('id="confirmCgnatDeleteButton"', FRONTEND)
+        self.assertIn("Excluir definitivamente", FRONTEND)
+        self.assertIn(
+            "Esta ação removerá permanentemente o lote rejeitado e permitirá que o arquivo seja importado novamente.",
+            FRONTEND,
+        )
+        self.assertIn(
+            "Esta ação removerá permanentemente o lote com falha e permitirá que o arquivo seja importado novamente.",
+            FRONTEND,
+        )
+        self.assertIn("await apiRequest(`/api/cgnat/imports/${batchId}`, { method: 'DELETE' });", FRONTEND)
+        self.assertIn("showGmjToast(`Lote #${batchId} excluído.`);", FRONTEND)
 
 
 if __name__ == "__main__":

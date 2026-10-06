@@ -2460,6 +2460,27 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
       background: var(--overlay);
     }
 
+    .gmj-toast-stack {
+      position: fixed;
+      right: 18px;
+      bottom: 18px;
+      z-index: 1090;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .gmj-toast {
+      color: var(--text-primary);
+      background: var(--surface-secondary);
+      border: 1px solid var(--border);
+      border-left: 3px solid var(--success);
+      border-radius: 8px;
+      padding: 10px 14px;
+      font-size: 0.9rem;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+    }
+
     html[data-theme] .result-box {
       color: var(--map-label);
       background: var(--map-background);
@@ -8633,6 +8654,22 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
               </table>
             </div>
           </section>
+
+          <div id="cgnatDeleteModal" class="gmj-modal" role="dialog" aria-modal="true" aria-labelledby="cgnatDeleteModalTitle">
+            <div class="gmj-dialog">
+              <div class="gmj-dialog-header">
+                <h2 id="cgnatDeleteModalTitle" class="view-title">Excluir lote</h2>
+                <button type="button" class="icon-button" data-close-modal="cgnatDeleteModal" aria-label="Fechar"><i data-lucide="x"></i></button>
+              </div>
+              <div class="gmj-dialog-body">
+                <p id="cgnatDeleteModalMessage" class="subtle mb-0">Esta ação é permanente.</p>
+              </div>
+              <div class="gmj-dialog-footer">
+                <button type="button" class="btn btn-sm btn-outline-secondary" data-close-modal="cgnatDeleteModal">Cancelar</button>
+                <button id="confirmCgnatDeleteButton" type="button" class="btn btn-sm btn-danger">Excluir definitivamente</button>
+              </div>
+            </div>
+          </div>
 
           <section class="panel p-3 mb-3">
             <div class="d-flex justify-content-between align-items-center gap-2 mb-2">
@@ -30305,6 +30342,23 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       document.getElementById(id).classList.remove('open');
     }
 
+    function showGmjToast(message) {
+      if (!message) return;
+      let stack = document.getElementById('gmjToastStack');
+      if (!stack) {
+        stack = document.createElement('div');
+        stack.id = 'gmjToastStack';
+        stack.className = 'gmj-toast-stack';
+        document.body.appendChild(stack);
+      }
+      const toast = document.createElement('div');
+      toast.className = 'gmj-toast';
+      toast.setAttribute('role', 'status');
+      toast.textContent = message;
+      stack.appendChild(toast);
+      setTimeout(() => toast.remove(), 4000);
+    }
+
     function rangeSelectId(target) {
       if (target === 'dashboard') return 'rangeMinutes';
       if (target === 'top') return 'topFlowRangeMinutes';
@@ -31085,7 +31139,8 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
           ['uploaded', 'failed', 'validation_failed'].includes(status) ? `<button type="button" class="btn btn-sm btn-outline-secondary cgnat-batch-action" data-action="reparse" data-id="${batch.id}">Reprocessar</button>` : '',
           status === 'approved' ? `<button type="button" class="btn btn-sm btn-outline-success cgnat-batch-action" data-action="activate" data-id="${batch.id}">Ativar</button>` : '',
           status === 'active' ? `<button type="button" class="btn btn-sm btn-outline-warning cgnat-batch-action" data-action="deactivate" data-id="${batch.id}">Desativar</button>` : '',
-          ['uploaded', 'failed', 'validation_failed', 'awaiting_approval'].includes(status) ? `<button type="button" class="btn btn-sm btn-outline-danger cgnat-batch-action" data-action="reject" data-id="${batch.id}">Rejeitar</button>` : ''
+          ['uploaded', 'failed', 'validation_failed', 'awaiting_approval'].includes(status) ? `<button type="button" class="btn btn-sm btn-outline-danger cgnat-batch-action" data-action="reject" data-id="${batch.id}">Rejeitar</button>` : '',
+          ['rejected', 'failed', 'validation_failed'].includes(status) ? `<button type="button" class="btn btn-sm btn-outline-danger cgnat-batch-action" data-action="delete" data-id="${batch.id}" data-status="${status}">Excluir</button>` : ''
         ].filter(Boolean).join('');
         return `
           <tr>
@@ -31581,9 +31636,47 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       await loadCgnatWorkspace();
     }
 
+    let pendingCgnatDeleteBatchId = null;
+
+    function openCgnatDeleteModal(batchId, status) {
+      pendingCgnatDeleteBatchId = Number(batchId) || null;
+      const normalized = String(status || '');
+      setText('cgnatDeleteModalTitle', `Excluir lote #${batchId}?`);
+      setText(
+        'cgnatDeleteModalMessage',
+        normalized === 'rejected'
+          ? 'Esta ação removerá permanentemente o lote rejeitado e permitirá que o arquivo seja importado novamente.'
+          : 'Esta ação removerá permanentemente o lote com falha e permitirá que o arquivo seja importado novamente.'
+      );
+      openModal('cgnatDeleteModal');
+    }
+
+    async function confirmCgnatBatchDelete() {
+      const batchId = pendingCgnatDeleteBatchId;
+      if (!batchId) return;
+      try {
+        await apiRequest(`/api/cgnat/imports/${batchId}`, { method: 'DELETE' });
+      } catch (error) {
+        showGmjToast(`Falha ao excluir lote #${batchId}: ${error.message}`);
+        throw error;
+      }
+      pendingCgnatDeleteBatchId = null;
+      closeModal('cgnatDeleteModal');
+      showGmjToast(`Lote #${batchId} excluído.`);
+      setText('cgnatProgress', `Lote #${batchId} excluído.`);
+      if (Number(currentCgnatBatchId) === Number(batchId)) {
+        renderCgnatBatch(null);
+      }
+      await loadCgnatWorkspace();
+    }
+
     async function handleCgnatHistoryAction(button) {
       const batchId = Number(button.dataset.id);
       const action = button.dataset.action;
+      if (action === 'delete') {
+        openCgnatDeleteModal(batchId, button.dataset.status);
+        return;
+      }
       currentCgnatBatchId = batchId;
       if (action === 'view') {
         await loadCgnatBatch(batchId);
@@ -33356,6 +33449,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       const button = event.target.closest('.cgnat-batch-action');
       if (button) handleCgnatHistoryAction(button).catch(error => setText('cgnatProgress', `Falha: ${error.message}`));
     });
+    document.getElementById('confirmCgnatDeleteButton').addEventListener('click', () => confirmCgnatBatchDelete().catch(error => setText('cgnatProgress', `Falha: ${error.message}`)));
     document.getElementById('cgnatMappingSearch').addEventListener('input', () => loadCgnatMappings().catch(error => setText('cgnatStatus', `Falha: ${error.message}`)));
     document.getElementById('saveCgnatPoolButton').addEventListener('click', () => saveCgnatPool().catch(error => setText('cgnatStatus', `Falha ao salvar pool: ${error.message}`)));
     document.getElementById('clearCgnatPoolButton').addEventListener('click', () => clearCgnatPoolForm());

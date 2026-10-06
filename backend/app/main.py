@@ -74,6 +74,7 @@ from app.services.cgnat_mapping import (
     create_cgnat_import_batch,
     create_cgnat_pool,
     deactivate_cgnat_batch,
+    delete_cgnat_batch,
     delete_cgnat_pool,
     ensure_cgnat_schema,
     get_cgnat_batch,
@@ -5903,6 +5904,9 @@ def cgnat_http_error(exc: ValueError) -> HTTPException:
         "batch_not_approved",
         "batch_not_active",
         "active_or_historical_batch_cannot_be_rejected",
+        "active_batch_cannot_be_deleted",
+        "batch_status_not_deletable",
+        "batch_has_active_mappings",
     }:
         return HTTPException(status_code=409, detail=detail)
     return HTTPException(status_code=400, detail=detail)
@@ -6202,6 +6206,36 @@ def cgnat_import_reject(request: Request, batch_id: int, payload: CgnatImportLif
             result = reject_cgnat_batch(conn, batch_id, cgnat_actor(request))
             conn.commit()
             return result
+    except ValueError as exc:
+        raise cgnat_http_error(exc) from exc
+
+
+@app.delete("/api/cgnat/imports/{batch_id}")
+def cgnat_import_delete(request: Request, batch_id: int):
+    require_admin(request)
+    ensure_sensor_db()
+    try:
+        with sqlite_connection() as conn:
+            actor = require_authenticated(request)
+            result = delete_cgnat_batch(conn, batch_id)
+            audit_request_action(
+                conn,
+                request,
+                actor,
+                "cgnat.batch.deleted",
+                resource_type="cgnat_batch",
+                resource_id=int(batch_id),
+                metadata={
+                    "filename": result.get("filename") or "",
+                    "file_hash": result.get("file_hash") or "",
+                    "old_status": result.get("old_status") or "",
+                    "deleted_at": result.get("deleted_at") or "",
+                    "removed_rows": int(result.get("removed_rows") or 0),
+                    "removed_mappings": int(result.get("removed_mappings") or 0),
+                },
+            )
+            conn.commit()
+        return result
     except ValueError as exc:
         raise cgnat_http_error(exc) from exc
 
