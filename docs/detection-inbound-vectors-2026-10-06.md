@@ -267,3 +267,61 @@ condições, mesmo `dst_ip`:
 1. `docker tag gmj-flow-backend:pre-fase4-20261006 gmj-flow-backend:latest`
 2. `docker compose up -d --no-deps backend && docker compose up -d --no-deps detector`
 3. Se 502: `docker exec gmj-flow-frontend nginx -s reload` (idem `gmj-flow-preview`).
+
+## 10. Fase 4.2 — band-split do `DNS_REFLECTION_INBOUND` e ativação (2026-10-06)
+
+Executada com o repositório em `65eba5b` → commit `82523c0` (branch `preserve/fibinet-20260928`).
+
+### 10.1 Semântica real dos legados (auditada no código e no banco)
+
+`comparison = "over"` avalia `observed > threshold` (`comparison_matches` em `main.py`), ou seja
+**estritamente maior**: `DNS_AMP_INBOUND_HIGH_BITS` warning `bps > 80M` / critical `bps > 100M`;
+`DNS_AMP_INBOUND_HIGH_PPS` warning `pps > 20k` / critical `pps > 40k` (ids 13/14 no template 1,
+27/28 no template 2). Nenhum threshold legado foi alterado.
+
+### 10.2 Band-split implementado (apenas no preset single)
+
+- WARNING: `(bps >= 15M OR pps >= 3k) AND NOT (bps > 80M OR pps > 20k)`
+- CRITICAL: `(bps >= 30M OR pps >= 8k) AND NOT (bps > 80M OR pps > 20k)`
+
+A exclusão usa as condições reais de WARNING dos legados nas **duas** severidades — é a única
+forma de garantir zero overlap: em `85 Mbps / 5 kpps` (legado BITS warning) e `50 Mbps / 25 kpps`
+(legado PPS warning) o novo vetor deixa de casar; nos limiares exatos (`80M`, `20k`) o legado
+não casa (`>` estrito) e o novo cobre o ponto, sem gap. A variante `_MULTI` permanece inalterada.
+
+### 10.3 Provas
+
+- Matriz de fronteiras (11 cenários do plano + exatos 80M/20k/100M/40k) com **zero overlap e
+  zero gap** (`tests/test_inbound_vector_presets.py`, `DnsReflectionBandSplitTest`).
+- Dedupe audit (`scripts/audit_inbound_dedupe.py`, pipeline real): `20M/4k` e `50M/10k` →
+  1 evento (só o novo); `85M/25k` e `120M/50k` → 2 eventos (só os legados A/B; o novo não casa).
+- Replay read-only (314 scans, mesmos buckets da seção 4.1): before × after **sem nenhuma
+  diferença**; 0 falsos positivos (máximos ~5,7 kbps no período).
+
+### 10.4 Ativação e custo observado
+
+- Regra criada via preset canônico (`POST /api/detection/templates/1/rules`): id **29**
+  `DNS_REFLECTION_INBOUND` — enabled, direction `receives`, UDP src_port 53, window 60 s,
+  group_by `dst_ip`, response `DETECTION_ONLY`, cooldown 300 s.
+- 3 ciclos com 28 regras (desligado): 55,59 / 51,52 / 58,57 s (média 55,2 s).
+- Com a regra ativa: 54,79–58,69 s (média **56,28 s** em 9 ciclos concluídos) → Δ ≈ **+1 s**
+  (abaixo do previsto +3 s; limite de rollback de 65 s não foi atingido).
+- `queries_last_cycle` 168–170 → 174–176 (+6); scan_cache 40–42 hits / 168–176 misses;
+  `rules_enabled=29`, `rules_evaluated_last_run=29`; 0 erros; 0 anomalias.
+- Ingestão estável: ~2.958 rows/s (2.126.488 linhas em 719 s), sem backlog (`detector_lag=0`).
+- CPU: detector ~23% média (pico 72% na janela do restart), ClickHouse ~149% média,
+  backend ~99% média.
+- Observação: 1 restart gracioso do processo do detector (exit 0, sem OOM) às 20:32:52Z durante
+  a janela; ciclos retomados normalmente, 0 erros, regra e contadores preservados.
+
+### 10.5 Rollback
+
+1. Desligar apenas a regra: `PUT /api/detection/templates/1/rules/29` com `enabled=false`
+   (ou `DELETE` da regra).
+2. Código: `git revert 82523c0`.
+3. Imagem: `docker tag gmj-flow-backend:pre-fase42-20261006 gmj-flow-backend:latest && docker compose up -d --no-deps backend detector`.
+
+### 10.6 Próximo vetor (recomendação — nenhuma outra ativação nesta fase)
+
+`DNS_QUERY_FLOOD_INBOUND` (UDP dst 53 inbound; replay sem FP e folga grande) como próximo
+candidato, após janela de observação de 24–48 h do vetor atual.
