@@ -89,6 +89,7 @@ from app.services.cgnat_mapping import (
     store_cgnat_preview,
     update_cgnat_pool,
 )
+from app.services import anomaly_correlation
 from app.services.network_assets import (
     ADDRESSING_MODES,
     CGNAT_POOL,
@@ -5013,6 +5014,13 @@ def ensure_sensor_db() -> None:
         except Exception as exc:
             logger.exception(
                 "Falha ao migrar dashboards configuráveis; dashboard legado permanecerá disponível: %s",
+                exc,
+            )
+        try:
+            anomaly_correlation.ensure_anomaly_correlation_schema(conn)
+        except Exception as exc:
+            logger.exception(
+                "Falha ao migrar correlacao de anomalias; recurso ficara indisponivel: %s",
                 exc,
             )
         conn.commit()
@@ -32287,6 +32295,8 @@ def upsert_security_anomaly(conn: sqlite3.Connection, candidate: dict[str, Any])
         scope = internal_ip_scope_fields(candidate.get("domain"), candidate.get("direction"), candidate.get("internal_ip") or candidate.get("src_ip") or candidate.get("dst_ip"))
         candidate = {**candidate, **scope}
     dedupe_key = security_anomaly_dedupe_key(candidate)
+    match_first_seen = candidate.get("first_seen")
+    match_last_seen = candidate.get("last_seen")
     detected_sensor = resolve_detected_sensor(conn, candidate)
     existing = conn.execute(
         """
@@ -32466,7 +32476,17 @@ def upsert_security_anomaly(conn: sqlite3.Connection, candidate: dict[str, Any])
                 "updated_at": now,
             },
         )
-        media_dispatch.track_created("security_anomaly", int(cursor.lastrowid or 0))
+        new_anomaly_id = int(cursor.lastrowid or 0)
+        media_dispatch.track_created("security_anomaly", new_anomaly_id)
+        anomaly_correlation.record_occurrence_safe(
+            conn,
+            anomaly_table="security_anomalies",
+            anomaly_id=new_anomaly_id,
+            anomaly=candidate,
+            first_seen=match_first_seen,
+            last_seen=match_last_seen or now,
+            severity=candidate.get("severity"),
+        )
         return "created"
     conn.execute(
         """
@@ -32516,6 +32536,15 @@ def upsert_security_anomaly(conn: sqlite3.Connection, candidate: dict[str, Any])
         WHERE id = ?
         """,
         (*values, now, detected_sensor["detected_sensor_id"], int(existing["id"])),
+    )
+    anomaly_correlation.record_occurrence_safe(
+        conn,
+        anomaly_table="security_anomalies",
+        anomaly_id=int(existing["id"]),
+        anomaly=candidate,
+        first_seen=match_first_seen,
+        last_seen=match_last_seen or now,
+        severity=candidate.get("severity"),
     )
     return "updated"
 
@@ -33190,6 +33219,7 @@ def acknowledge_security_anomaly(anomaly_id: int):
             "UPDATE security_anomalies SET status = 'acknowledged', acknowledged_at = COALESCE(acknowledged_at, ?), ended_at = COALESCE(ended_at, ?), updated_at = ? WHERE id = ?",
             (now, now, now, anomaly_id),
         )
+        anomaly_correlation.mark_occurrences_ended(conn, "security_anomalies", [anomaly_id], now)
         conn.commit()
     return {"status": "acknowledged", "id": anomaly_id}
 
@@ -33206,6 +33236,7 @@ def close_security_anomaly(anomaly_id: int):
             "UPDATE security_anomalies SET status = 'closed', ended_at = COALESCE(ended_at, ?), updated_at = ? WHERE id = ?",
             (now, now, anomaly_id),
         )
+        anomaly_correlation.mark_occurrences_ended(conn, "security_anomalies", [anomaly_id], now)
         conn.commit()
     return {"status": "closed", "id": anomaly_id}
 
@@ -36384,6 +36415,24 @@ def upsert_anomaly_event(
             threshold,
         )
 
+    subject_source = {
+        **traffic,
+        "direction": vector.get("direction"),
+        "target_role": scope.get("target_role"),
+        "target_cidr": scope.get("target_cidr") or vector.get("target_cidr"),
+        "vector": vector.get("name") or vector.get("detection_key") or vector.get("decoder"),
+    }
+    anomaly_correlation.record_occurrence_safe(
+        conn,
+        anomaly_table="anomaly_events",
+        anomaly_id=event_id,
+        anomaly=subject_source,
+        first_seen=end_dt,
+        last_seen=end_dt,
+        severity=severity,
+        metric=vector.get("threshold_unit"),
+        metric_value=observed,
+    )
     sample_count = conn.execute(
         "SELECT COUNT(*) AS count FROM anomaly_event_flows WHERE anomaly_event_id = ?",
         (event_id,),
@@ -36439,6 +36488,12 @@ def close_stale_anomaly_events(conn: sqlite3.Connection, now: datetime) -> int:
             row["decoder"],
         )
     if closed:
+        anomaly_correlation.mark_occurrences_ended(
+            conn,
+            "anomaly_events",
+            [int(row["id"]) for row in stale_rows],
+            iso(now),
+        )
         logger.info("Anomalias encerradas por inatividade=%s", closed)
     return closed
 
@@ -36840,6 +36895,17 @@ def upsert_detection_template_dns_anomaly_event(conn: sqlite3.Connection, candid
                 int(candidate.get("flows") or 1),
             ),
         )
+    anomaly_correlation.record_occurrence_safe(
+        conn,
+        anomaly_table="anomaly_events",
+        anomaly_id=event_id,
+        anomaly={**candidate, **common},
+        first_seen=first_seen,
+        last_seen=now,
+        severity=common["severity"],
+        metric=common["metric_unit"],
+        metric_value=common["observed_value"],
+    )
     return action
 
 
@@ -40361,6 +40427,7 @@ def acknowledge_anomaly(request: Request, event_id: int):
                 f"UPDATE security_anomalies SET status = 'acknowledged', acknowledged_at = COALESCE(acknowledged_at, ?), ended_at = COALESCE(ended_at, ?), updated_at = ? WHERE id IN ({placeholders})",
                 [now, now, now, *ids],
             )
+            anomaly_correlation.mark_occurrences_ended(conn, "security_anomalies", ids, now)
         conn.commit()
         return {"ok": True}
     with sqlite_connection() as conn:
@@ -40377,6 +40444,7 @@ def acknowledge_anomaly(request: Request, event_id: int):
                 """,
                 (now, now, now, event_id),
             )
+            anomaly_correlation.mark_occurrences_ended(conn, "anomaly_events", [event_id], now)
             conn.commit()
         else:
             security_item = resolve_security_anomaly_identifier(conn, event_id, raise_not_found=False)
@@ -40387,6 +40455,7 @@ def acknowledge_anomaly(request: Request, event_id: int):
                 "UPDATE security_anomalies SET status = 'acknowledged', acknowledged_at = COALESCE(acknowledged_at, ?), ended_at = COALESCE(ended_at, ?), updated_at = ? WHERE id = ?",
                 (now, now, now, anomaly_id),
             )
+            anomaly_correlation.mark_occurrences_ended(conn, "security_anomalies", [anomaly_id], now)
             conn.commit()
             return {"ok": True, "id": anomaly_id, "action_id": legacy_consolidated_security_anomaly_id(security_consolidation_key(security_item))}
     return {"ok": True}
@@ -40408,6 +40477,7 @@ def close_anomaly(request: Request, event_id: int):
                 f"UPDATE security_anomalies SET status = 'closed', ended_at = COALESCE(ended_at, ?), updated_at = ? WHERE id IN ({placeholders})",
                 [now, now, *ids],
             )
+            anomaly_correlation.mark_occurrences_ended(conn, "security_anomalies", ids, now)
         conn.commit()
         return {"ok": True}
     with sqlite_connection() as conn:
@@ -40423,6 +40493,7 @@ def close_anomaly(request: Request, event_id: int):
                 """,
                 (now, now, event_id),
             )
+            anomaly_correlation.mark_occurrences_ended(conn, "anomaly_events", [event_id], now)
             conn.commit()
         else:
             security_item = resolve_security_anomaly_identifier(conn, event_id, raise_not_found=False)
@@ -40433,6 +40504,7 @@ def close_anomaly(request: Request, event_id: int):
                 "UPDATE security_anomalies SET status = 'closed', ended_at = COALESCE(ended_at, ?), updated_at = ? WHERE id = ?",
                 (now, now, anomaly_id),
             )
+            anomaly_correlation.mark_occurrences_ended(conn, "security_anomalies", [anomaly_id], now)
             conn.commit()
             return {"ok": True, "id": anomaly_id, "action_id": legacy_consolidated_security_anomaly_id(security_consolidation_key(security_item))}
     return {"ok": True}
