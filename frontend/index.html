@@ -3819,6 +3819,47 @@ html[data-theme="light"] .geo-flow-map .geo-flow-rate-marker span {
     @media (max-width: 575.98px) {
       .alerts-filter-grid { grid-template-columns: 1fr; }
     }
+    /* Seletor de anomalias do modal "Testar destino": cards com altura automatica. */
+    #mediaTestAnomalyList .media-anomaly-item {
+      display: flex;
+      flex-direction: column;
+      align-items: stretch;
+      gap: 3px;
+      flex: 0 0 auto;
+      height: auto;
+      max-height: none;
+      min-height: auto;
+      margin: 0;
+      padding: 9px 11px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      line-height: 1.35;
+      cursor: pointer;
+      overflow-wrap: anywhere;
+      transition: border-color .15s ease, background-color .15s ease;
+    }
+    #mediaTestAnomalyList .media-anomaly-item:hover { border-color: var(--accent); }
+    #mediaTestAnomalyList .media-anomaly-item.is-selected,
+    #mediaTestAnomalyList .media-anomaly-item:has(input[name="mediaTestAnomaly"]:checked) {
+      border-color: var(--accent);
+      background: rgba(15, 118, 110, .10);
+      box-shadow: inset 0 0 0 1px var(--accent);
+    }
+    #mediaTestAnomalyList .media-anomaly-head {
+      display: flex;
+      align-items: baseline;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+    #mediaTestAnomalyList .media-anomaly-radio {
+      flex: 0 0 auto;
+      margin: 3px 4px 0 0;
+      accent-color: var(--accent);
+    }
+    #mediaTestAnomalyList .media-anomaly-vector { font-weight: 600; }
+    #mediaTestAnomalyList .media-anomaly-line { display: block; font-size: 12px; }
+    #mediaTestAnomalyList .media-anomaly-recurrence { margin-top: 2px; }
+    #mediaTestAnomalyList .media-anomaly-recurrence.is-recurrence { color: #c98a12; font-weight: 600; }
   </style>
 </head>
 <body>
@@ -32599,6 +32640,13 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       }
     }
 
+    function mediaTestAnomalyHighlight() {
+      document.querySelectorAll('#mediaTestAnomalyList .media-anomaly-item').forEach(label => {
+        const radio = label.querySelector('input[name="mediaTestAnomaly"]');
+        label.classList.toggle('is-selected', Boolean(radio && radio.checked));
+      });
+    }
+
     function renderMediaTestAnomalies(items) {
       const list = document.getElementById('mediaTestAnomalyList');
       if (!Array.isArray(items) || !items.length) {
@@ -32609,22 +32657,29 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         const severity = String(item.severity || 'info').toLowerCase();
         const severityClass = severity === 'critical' ? 'text-danger' : severity === 'warning' ? 'text-warning' : 'text-secondary';
         const value = `${item.table}:${item.id}`;
+        const isRecurrence = Boolean(item.correlation && item.correlation.is_recurrence);
+        const recurrence = mediaTestAnomalyRecurrenceText(item.correlation);
         const target = item.target_ip
           ? `${escapeHtml(item.target_ip)}${item.target_port ? `:${item.target_port}` : ''}`
           : '—';
-        const recurrence = mediaTestAnomalyRecurrenceText(item.correlation);
+        const contextLine = `${target}${item.sensor_name ? ` · ${escapeHtml(item.sensor_name)}` : ''}`;
+        const metaLine = `${escapeHtml(formatDateTime(item.last_seen_at))} · ${escapeHtml(item.status || '—')}${item.direction ? ` · ${escapeHtml(item.direction)}` : ''}`;
+        const recurrenceLine = recurrence
+          ? `<span class="media-anomaly-line media-anomaly-recurrence${isRecurrence ? ' is-recurrence' : ' subtle'}">${isRecurrence ? '🔁 ' : ''}${escapeHtml(recurrence)}</span>`
+          : '';
         return `
-          <label class="form-check" style="border:1px solid var(--border); border-radius:8px; padding:8px 10px; display:block;">
-            <input type="radio" class="form-check-input" name="mediaTestAnomaly" value="${value}">
-            <span class="form-check-label">
+          <label class="media-anomaly-item" data-anomaly="${value}">
+            <span class="media-anomaly-head">
+              <input type="radio" class="media-anomaly-radio" name="mediaTestAnomaly" value="${value}">
               <strong class="${severityClass}">[ ${escapeHtml(severity.toUpperCase())} ]</strong>
-              ${escapeHtml(item.display_name || item.vector_name || '—')}
-              <span class="subtle">· ${escapeHtml(item.status || '—')}${item.direction ? ` · ${escapeHtml(item.direction)}` : ''}</span>
-              <div class="subtle">${target}${item.sensor_name ? ` · ${escapeHtml(item.sensor_name)}` : ''} · ${escapeHtml(formatDateTime(item.last_seen_at))}</div>
-              ${recurrence ? `<div class="subtle">${escapeHtml(recurrence)}</div>` : ''}
+              <span class="media-anomaly-vector">${escapeHtml(item.display_name || item.vector_name || '—')}</span>
             </span>
+            <span class="media-anomaly-line subtle">${contextLine}</span>
+            <span class="media-anomaly-line subtle">${metaLine}</span>
+            ${recurrenceLine}
           </label>`;
       }).join('');
+      mediaTestAnomalyHighlight();
     }
 
     async function loadMediaTestAnomalies() {
@@ -32957,6 +33012,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       document.getElementById('mediaTestAnomalyList')?.addEventListener('change', event => {
         const target = event.target;
         if (target && target.name === 'mediaTestAnomaly') {
+          mediaTestAnomalyHighlight();
           loadMediaTestDestinationPreview().catch(error => setText('mediaTestDestinationStatus', `Falha no preview: ${error.message}`));
         }
       });
