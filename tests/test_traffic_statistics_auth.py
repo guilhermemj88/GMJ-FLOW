@@ -3,6 +3,32 @@
 import sys
 from pathlib import Path
 
+import importlib
+
+# The wider suite installs lightweight stubs for third-party modules in
+# sys.modules; purge them so the real packages are imported when everything
+# runs in one process.
+for _stub in ("fastapi", "starlette", "pydantic", "jose", "passlib", "clickhouse_connect"):
+    _module = sys.modules.get(_stub)
+    if _module is not None and not hasattr(_module, "__file__") and not hasattr(_module, "__path__"):
+        for _name in [n for n in sys.modules if n == _stub or n.startswith(_stub + ".")]:
+            del sys.modules[_name]
+        importlib.invalidate_caches()
+
+# The feature modules may have been imported earlier (via app.main) while the
+# stubs were active; drop them so they are rebuilt against the real packages.
+for _parent, _child in (
+    ("app.api", "traffic_statistics"),
+    ("app.services", "traffic_statistics"),
+    ("app.services", "traffic_statistics_math"),
+):
+    sys.modules.pop(_parent + "." + _child, None)
+    # `from app.api import X` returns the cached package attribute without
+    # re-importing, so the attribute must be dropped as well.
+    _package = sys.modules.get(_parent)
+    if _package is not None:
+        _package.__dict__.pop(_child, None)
+
 from fastapi.testclient import TestClient
 from starlette.requests import Request
 
