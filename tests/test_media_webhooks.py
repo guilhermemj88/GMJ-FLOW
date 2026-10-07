@@ -7,6 +7,7 @@ import threading
 import types
 import unittest
 import urllib.error
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -1900,6 +1901,343 @@ class MediaCorrelationPayloadTest(MediaBase):
         self.assertNotIn("anomaly_occurrences", self.SOURCE)
         self.assertNotIn("record_anomaly_occurrence", self.SOURCE)
         self.assertIn("resolve_anomaly_correlation", self.SOURCE)
+
+
+class MediaDestinationTestModesTest(MediaBase):
+    """Botao "Testar destino": modo evento padrao completo e modo anomalia real."""
+
+    def _insert_destination(self, **overrides):
+        values = {
+            "name": overrides.pop("name", "webhook modos"),
+            "type": "webhook",
+            "url": overrides.pop("url", "http://10.0.0.5:5678/webhook"),
+            "active": 1,
+            "all_sensors": 1,
+            "payload_template": overrides.pop("payload_template", None),
+            "event_types": json.dumps(["anomaly_detected"]),
+            "minimum_severity": "info",
+            "timeout_seconds": 5,
+            "secret_encrypted": "",
+            "secret_header": "X-GMJ-Flow-Token",
+            "created_at": "2026-10-07T00:00:00Z",
+            "updated_at": "2026-10-07T00:00:00Z",
+        }
+        values.update(overrides)
+        with backend_main.sqlite_connection() as conn:
+            cursor = backend_main.sqlite_insert_dict(conn, "media_integrations", values)
+            conn.commit()
+            return int(cursor.lastrowid)
+
+    def _seed_cgnat_mapping(self):
+        with backend_main.sqlite_connection() as conn:
+            backend_main.ensure_cgnat_schema(conn)
+            now = "2026-10-07T00:00:00Z"
+            cursor = conn.execute(
+                """
+                INSERT INTO cgnat_import_batches
+                    (filename, original_filename, file_hash, status, created_at, activated_at, approved_at, total_rows, valid_rows)
+                VALUES (?, ?, ?, 'active', ?, ?, ?, 1, 1)
+                """,
+                ("a10-modes.txt", "a10-modes.txt", "modes-test-hash", now, now, now),
+            )
+            batch_id = int(cursor.lastrowid)
+            conn.execute(
+                """
+                INSERT INTO cgnat_port_mappings
+                    (batch_id, source_type, source_filename, device_name, pool_name, public_ip, private_ip,
+                     protocol, port_start, port_end, active, confidence, created_at, updated_at)
+                VALUES (?, 'a10', 'a10-modes.txt', 'A10-FIBINET', 'PUBLIC-POOL-01', '179.189.80.242', '100.64.9.50',
+                        'udp', 19168, 21183, 1, 1.0, ?, ?)
+                """,
+                (batch_id, now, now),
+            )
+            conn.commit()
+
+    def _insert_anomaly_event(self, **overrides):
+        values = {
+            "direction": "transmits",
+            "decoder": "DNS",
+            "severity": "critical",
+            "metric_unit": "packets_s",
+            "threshold_value": 5000.0,
+            "observed_value": 6400.0,
+            "peak_value": 6400.0,
+            "started_at": "2026-10-07T09:56:40Z",
+            "last_seen_at": "2026-10-07T09:56:40Z",
+            "created_at": "2026-10-07T09:56:40Z",
+            "updated_at": "2026-10-07T10:02:49Z",
+            "status": "ended",
+            "vector_name": "DNS_SINGLE_FLOW_OUTBOUND",
+            "target_ip": "179.189.80.242",
+            "target_cidr": "179.189.80.242/32",
+            "target_port": 53,
+            "target_role": "src_ip",
+            "protocol": "udp",
+            "top_src_ip": "179.189.80.242",
+            "top_src_port": 20486,
+            "top_dst_ip": "54.233.253.229",
+            "top_dst_port": 53,
+            "dedupe_key": "modes-test",
+            "mitigation_basis": "dns_outbound_conversation",
+        }
+        values.update(overrides)
+        with backend_main.sqlite_connection() as conn:
+            cursor = backend_main.sqlite_insert_dict(conn, "anomaly_events", values)
+            conn.commit()
+            return int(cursor.lastrowid)
+
+    def _insert_security_anomaly(self, **overrides):
+        values = {
+            "vector": "PREFIX_INTERNAL_IP_TO_DST_HIGH_UDP_PPS",
+            "severity": "warning",
+            "status": "ended",
+            "zone_name": "Clientes GM-TELECOM",
+            "direction": "transmits",
+            "src_ip": "45.5.249.210",
+            "dst_ip": "51.38.168.203",
+            "target_ip": "45.5.249.210",
+            "target_cidr": "45.5.249.210/32",
+            "protocol": "UDP",
+            "packets_s": 77900.0,
+            "bits_s": 39884800.0,
+            "first_seen": "2026-10-03T19:45:36Z",
+            "last_seen": "2026-10-03T20:27:30Z",
+            "message": "Anomalia de teste do seletor de destino.",
+            "created_at": "2026-10-03T19:47:51Z",
+            "updated_at": "2026-10-03T20:29:33Z",
+        }
+        values.update(overrides)
+        with backend_main.sqlite_connection() as conn:
+            cursor = backend_main.sqlite_insert_dict(conn, "security_anomalies", values)
+            conn.commit()
+            return int(cursor.lastrowid)
+
+    def _seed_occurrence(
+        self,
+        anomaly_id,
+        *,
+        table="anomaly_events",
+        vector_key="DNS_SINGLE_FLOW_OUTBOUND",
+        subject_type="cgnat_private_ip",
+        subject_key="100.64.9.50",
+        day="2026-10-07",
+        first_seen="2026-10-07T06:00:00Z",
+        last_seen="2026-10-07T06:05:00Z",
+        severity="critical",
+        metric_peak=6400.0,
+    ):
+        with backend_main.sqlite_connection() as conn:
+            backend_main.anomaly_correlation.ensure_anomaly_correlation_schema(conn)
+            conn.execute(
+                """
+                INSERT INTO anomaly_occurrences
+                    (anomaly_table, anomaly_id, vector_key, dedupe_key, subject_type, subject_key,
+                     subject_confidence, subject_context_json, operational_day, first_seen, last_seen,
+                     ended_at, severity, metric, metric_peak, created_at, updated_at)
+                VALUES (?, ?, ?, '', ?, ?, 'high', '{}', ?, ?, ?, NULL, ?, 'packets_s', ?, ?, ?)
+                """,
+                (
+                    table,
+                    int(anomaly_id),
+                    vector_key,
+                    subject_type,
+                    subject_key,
+                    day,
+                    first_seen,
+                    last_seen,
+                    severity,
+                    metric_peak,
+                    first_seen,
+                    last_seen,
+                ),
+            )
+            conn.commit()
+
+    def _call_test_endpoint(self, media_id, payload=None):
+        with mock.patch.object(
+            media_dispatch,
+            "post_json",
+            return_value={"ok": True, "http_status": 200, "duration_ms": 7, "error": ""},
+        ) as post:
+            result = backend_main.test_media(media_id, request=None, payload=payload)
+        return result, post.call_args[0][1]
+
+    def test_picker_lists_recent_anomalies_with_correlation(self):
+        now = datetime.now(timezone.utc)
+        recent = (now - timedelta(hours=2)).isoformat().replace("+00:00", "Z")
+        older = (now - timedelta(hours=5)).isoformat().replace("+00:00", "Z")
+        event_id = self._insert_anomaly_event(started_at=recent, last_seen_at=recent, created_at=recent, updated_at=recent)
+        self._seed_occurrence(9001, first_seen=older, last_seen=older)
+        self._seed_occurrence(event_id, first_seen=recent, last_seen=recent)
+        payload = backend_main.media_anomaly_candidates(request=None, limit=10, hours=48, q=None, severity=None)
+        items = payload["items"]
+        entry = next(item for item in items if item["id"] == event_id and item["table"] == "anomaly_events")
+        self.assertEqual(entry["severity"], "critical")
+        self.assertEqual(entry["vector_name"], "DNS_SINGLE_FLOW_OUTBOUND")
+        self.assertEqual(entry["target_ip"], "179.189.80.242")
+        self.assertEqual(entry["target_port"], 53)
+        correlation = entry["correlation"]
+        self.assertEqual(correlation["subject_key"], "100.64.9.50")
+        self.assertIs(correlation["is_recurrence"], True)
+        self.assertEqual(correlation["occurrence_number_today"], 2)
+        filtered = backend_main.media_anomaly_candidates(request=None, limit=10, hours=48, q="179.189.80.242", severity=None)
+        self.assertTrue(any(item["id"] == event_id for item in filtered["items"]))
+        empty = backend_main.media_anomaly_candidates(request=None, limit=10, hours=48, q="203.0.113.250", severity=None)
+        self.assertFalse(any(item["id"] == event_id for item in empty["items"]))
+
+    def test_existing_mode_sends_real_payload_without_side_effects(self):
+        self._seed_cgnat_mapping()
+        event_id = self._insert_anomaly_event()
+        self._seed_occurrence(9001, first_seen="2026-10-07T06:00:00Z", last_seen="2026-10-07T06:05:00Z")
+        self._seed_occurrence(event_id, first_seen="2026-10-07T09:56:40Z", last_seen="2026-10-07T09:56:40Z")
+        media_id = self._insert_destination()
+        with backend_main.sqlite_connection() as conn:
+            before_event = dict(conn.execute("SELECT * FROM anomaly_events WHERE id = ?", (event_id,)).fetchone())
+            before_occurrences = int(conn.execute("SELECT COUNT(*) AS n FROM anomaly_occurrences").fetchone()["n"])
+            before_logs = int(conn.execute("SELECT COUNT(*) AS n FROM media_delivery_logs").fetchone()["n"])
+        body = backend_main.MediaDestinationTestPayload(source="existing", anomaly_id=event_id, anomaly_table="anomaly_events")
+        result, envelope = self._call_test_endpoint(media_id, body)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["source"], "existing")
+        self.assertEqual(result["anomaly"]["id"], event_id)
+        self.assertIs(result["anomaly"]["is_recurrence"], True)
+        self.assertEqual(result["payload"], envelope)
+        data = envelope["data"]
+        self.assertEqual(data["event_id"], event_id)
+        self.assertEqual(data["status"], "ended")
+        self.assertEqual(data["vector_name"], "DNS_SINGLE_FLOW_OUTBOUND")
+        self.assertEqual(data["target_ip"], "179.189.80.242")
+        self.assertEqual(data["severity"], "critical")
+        self.assertEqual(data["correlation"]["subject_key"], "100.64.9.50")
+        self.assertEqual(data["correlation"]["occurrence_number_today"], 2)
+        self.assertEqual(data["correlation"]["previous_occurrences_today"], 1)
+        self.assertEqual(data["correlation"]["last_previous_occurrence_at"], "2026-10-07T06:00:00Z")
+        self.assertEqual(data["cgnat"]["private_ip"], "100.64.9.50")
+        with backend_main.sqlite_connection() as conn:
+            after_event = dict(conn.execute("SELECT * FROM anomaly_events WHERE id = ?", (event_id,)).fetchone())
+            after_occurrences = int(conn.execute("SELECT COUNT(*) AS n FROM anomaly_occurrences").fetchone()["n"])
+            after_logs = int(conn.execute("SELECT COUNT(*) AS n FROM media_delivery_logs").fetchone()["n"])
+            destination = conn.execute(
+                "SELECT last_test_status, last_test_http_status FROM media_integrations WHERE id = ?", (media_id,)
+            ).fetchone()
+        self.assertEqual(before_event, after_event)
+        self.assertEqual(before_occurrences, after_occurrences)
+        self.assertEqual(before_logs, after_logs)
+        self.assertEqual(destination["last_test_status"], "success")
+        self.assertEqual(int(destination["last_test_http_status"]), 200)
+
+    def test_existing_mode_accepts_security_anomalies(self):
+        anomaly_id = self._insert_security_anomaly()
+        self._seed_occurrence(
+            anomaly_id,
+            table="security_anomalies",
+            vector_key="PREFIX_INTERNAL_IP_TO_DST_HIGH_UDP_PPS",
+            subject_type="ip",
+            subject_key="45.5.249.210",
+            day="2026-10-03",
+            first_seen="2026-10-03T19:45:36Z",
+            last_seen="2026-10-03T20:27:30Z",
+            severity="warning",
+            metric_peak=77900.0,
+        )
+        media_id = self._insert_destination()
+        body = backend_main.MediaDestinationTestPayload(source="existing", anomaly_id=anomaly_id, anomaly_table="security_anomalies")
+        result, envelope = self._call_test_endpoint(media_id, body)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["anomaly"]["table"], "security_anomalies")
+        data = envelope["data"]
+        self.assertEqual(data["event_id"], anomaly_id)
+        self.assertEqual(data["vector_name"], "PREFIX_INTERNAL_IP_TO_DST_HIGH_UDP_PPS")
+        self.assertEqual(data["target_ip"], "45.5.249.210")
+        self.assertEqual(data["status"], "ended")
+        self.assertEqual(data["correlation"]["subject_key"], "45.5.249.210")
+        self.assertIs(data["correlation"]["is_recurrence"], False)
+
+    def test_standard_mode_payload_is_complete_with_fallback_cgnat(self):
+        media_id = self._insert_destination()
+        result, envelope = self._call_test_endpoint(media_id)
+        self.assertEqual(result["source"], "standard")
+        data = envelope["data"]
+        for key in (
+            "event_id", "public_id", "target_ip", "target_cidr", "target_port", "target_role", "protocol",
+            "vector_name", "display_name", "severity", "direction", "status", "pps", "bps", "packets_s",
+            "bits_s", "flows", "packets", "bytes", "metric_unit", "observed_value", "threshold_value",
+            "peak_value", "unique_src_ips", "unique_dst_ips", "unique_dst_ports", "top_src_ip", "top_dst_ip",
+            "top_src_port", "top_dst_port", "top_packets", "top_bytes", "started_at", "last_seen_at",
+            "ended_at", "sensor", "sensor_id", "sensor_name", "exporter_ip", "sensor_resolution",
+            "source_name", "source_engine", "source_id", "decoder", "classification", "mitigation_basis",
+            "mitigation_reason", "mitigation_status", "zone_name", "summary", "dedupe_key",
+        ):
+            self.assertIsNotNone(data.get(key), f"campo {key} ausente no evento padrao")
+            self.assertNotEqual(data.get(key), "", f"campo {key} vazio no evento padrao")
+        self.assertEqual(data["vector_name"], "DNS_SINGLE_FLOW_OUTBOUND")
+        self.assertEqual(data["event_id"], 0)
+        self.assertEqual(data["status"], "test")
+        self.assertEqual(data["decoder"], "DNS")
+        self.assertEqual(data["sensor_name"], "NE8000-BGP-FIBINET")
+        self.assertEqual(data["threshold_value"], 5000.0)
+        self.assertEqual(data["ended_at"], "2026-10-06T12:20:00Z")
+        # Sem mapping vivo, o evento padrao usa o fallback de demonstracao.
+        self.assertEqual(data["cgnat"], media_dispatch.TEST_SAMPLE_CGNAT)
+        correlation = data["correlation"]
+        self.assertEqual(correlation, media_dispatch.TEST_SAMPLE_CORRELATION)
+        self.assertIs(correlation["is_recurrence"], True)
+        self.assertEqual(correlation["occurrence_number_today"], 4)
+        self.assertEqual(correlation["previous_occurrences_today"], 3)
+        self.assertEqual(len(correlation["previous_occurrences"]), 3)
+        self.assertIs(correlation["previous_occurrences_truncated"], False)
+
+    def test_standard_mode_uses_real_mapping_when_available(self):
+        self._seed_cgnat_mapping()
+        media_id = self._insert_destination()
+        result, envelope = self._call_test_endpoint(media_id)
+        self.assertTrue(result["ok"])
+        self.assertEqual(envelope["data"]["cgnat"]["private_ip"], "100.64.9.50")
+        self.assertEqual(envelope["data"]["cgnat"]["device_name"], "A10-FIBINET")
+
+    def test_existing_mode_keeps_test_flag_and_destination_template(self):
+        self._seed_cgnat_mapping()
+        event_id = self._insert_anomaly_event()
+        self._seed_occurrence(event_id, first_seen="2026-10-07T09:56:40Z", last_seen="2026-10-07T09:56:40Z")
+        template = '{"event": "{{event}}", "test": {{test}}, "id": {{event_id}}, "status": "{{status}}", "vector": "{{vector_name}}"}'
+        media_id = self._insert_destination(payload_template=template)
+        body = backend_main.MediaDestinationTestPayload(source="existing", anomaly_id=event_id, anomaly_table="anomaly_events")
+        _result, envelope = self._call_test_endpoint(media_id, body)
+        self.assertEqual(
+            envelope,
+            {
+                "event": "anomaly_detected",
+                "test": True,
+                "id": event_id,
+                "status": "ended",
+                "vector": "DNS_SINGLE_FLOW_OUTBOUND",
+            },
+        )
+
+    def test_modes_validation_errors(self):
+        media_id = self._insert_destination()
+        with self.assertRaises(backend_main.HTTPException) as context:
+            backend_main.test_media(media_id, request=None, payload=backend_main.MediaDestinationTestPayload(source="bogus"))
+        self.assertEqual(context.exception.status_code, 400)
+        with self.assertRaises(backend_main.HTTPException) as context:
+            backend_main.test_media(media_id, request=None, payload=backend_main.MediaDestinationTestPayload(source="existing"))
+        self.assertEqual(context.exception.status_code, 400)
+        with self.assertRaises(backend_main.HTTPException) as context:
+            backend_main.test_media(
+                media_id,
+                request=None,
+                payload=backend_main.MediaDestinationTestPayload(source="existing", anomaly_id=123, anomaly_table="users"),
+            )
+        self.assertEqual(context.exception.status_code, 400)
+        with self.assertRaises(backend_main.HTTPException) as context:
+            backend_main.test_media(
+                media_id,
+                request=None,
+                payload=backend_main.MediaDestinationTestPayload(
+                    source="existing", anomaly_id=999999, anomaly_table="anomaly_events"
+                ),
+            )
+        self.assertEqual(context.exception.status_code, 404)
 
 
 if __name__ == "__main__":

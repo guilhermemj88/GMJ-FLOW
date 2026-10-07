@@ -254,6 +254,8 @@ TEST_SAMPLE_EVENT = {
 # Correlation controlada do sample do botao "Testar destino": existe SOMENTE
 # para exercitar o contrato do webhook (data.correlation), com a MESMA
 # estrutura canonica devolvida pelo core. Nao representa historico real.
+# E propositalmente uma REINCIDENCIA completa: 4a ocorrencia do dia com as 3
+# anteriores detalhadas (previous_occurrences_truncated=False).
 TEST_SAMPLE_CORRELATION: dict[str, Any] = {
     "subject_type": "cgnat_private_ip",
     "subject_key": "100.64.9.50",
@@ -271,26 +273,65 @@ TEST_SAMPLE_CORRELATION: dict[str, Any] = {
             "anomaly_table": "anomaly_events",
             "first_seen": "2026-10-06T12:05:00Z",
             "last_seen": "2026-10-06T12:10:00Z",
-            "ended_at": "2026-10-06T12:10:00Z",
+            "ended_at": "2026-10-06T12:15:00Z",
             "severity": "warning",
             "metric": "packets_s",
-            "metric_value": 420000.0,
-        }
+            "metric_value": 5150.0,
+        },
+        {
+            "occurrence_id": 2,
+            "anomaly_id": 4651,
+            "anomaly_table": "anomaly_events",
+            "first_seen": "2026-10-06T09:41:12Z",
+            "last_seen": "2026-10-06T09:44:30Z",
+            "ended_at": "2026-10-06T09:49:30Z",
+            "severity": "critical",
+            "metric": "packets_s",
+            "metric_value": 7120.75,
+        },
+        {
+            "occurrence_id": 1,
+            "anomaly_id": 4629,
+            "anomaly_table": "anomaly_events",
+            "first_seen": "2026-10-06T03:22:05Z",
+            "last_seen": "2026-10-06T03:26:40Z",
+            "ended_at": "2026-10-06T03:31:40Z",
+            "severity": "warning",
+            "metric": "packets_s",
+            "metric_value": 5430.2,
+        },
     ],
-    "previous_occurrences_truncated": True,
+    "previous_occurrences_truncated": False,
     "operational_day": "2026-10-06",
     "timezone": "America/Sao_Paulo",
     "schema_version": 1,
 }
 
-# Sample padrao do botao "Testar destino" (test_media_integration). Usa os
-# mesmos nomes de campo do builder do preview administrativo
-# (media_test_event_data, em main.py) e reproduz o formato logico de uma
-# anomalia real de saida (direction=transmits) com coordenada CGNAT
-# resolvivel: 179.189.80.242:20486 -> 100.64.9.50. O lookup correto e
-# top_src_ip/top_src_port; target_port=53 NAO participa da resolucao.
+# Bloco CGNAT de demonstracao do evento padrao (modo "Gerar evento padrao" do
+# botao "Testar destino"). Espelha o mapping real de producao
+# (179.189.80.242:20486 -> 100.64.9.50) e so entra quando o resolver CGNAT
+# real nao encontra o mapeamento no momento do teste, garantindo que o evento
+# padrao nunca saia sem CGNAT. NUNCA participa do envio real nem do modo
+# "anomalia existente" (que usam somente a resolucao real).
+TEST_SAMPLE_CGNAT: dict[str, Any] = {
+    "resolved": True,
+    "public_ip": "179.189.80.242",
+    "public_port": 20486,
+    "private_ip": "100.64.9.50",
+    "device_name": "A10-FIBINET",
+    "pool_name": "PUBLIC-POOL-01",
+    "confidence": 1.0,
+}
+
+# Sample padrao do botao "Testar destino" (test_media_integration). Evento
+# sintetico COMPLETO: todos os placeholders preenchidos, espelhando uma
+# anomalia real de DNS outbound (DNS_SINGLE_FLOW_OUTBOUND, transmits, udp/53)
+# com coordenada CGNAT resolvivel: 179.189.80.242:20486 -> 100.64.9.50. O
+# lookup correto e top_src_ip/top_src_port; target_port=53 NAO participa da
+# resolucao. Marcadores de teste do evento: event_id=0 e status="test".
 # A correlation embutida e o contrato de exemplo (ver TEST_SAMPLE_CORRELATION)
-# e NAO representa historico real.
+# e NAO representa historico real; o CGNAT usa o resolver real e, se nao
+# houver match, o fallback de demonstracao TEST_SAMPLE_CGNAT (somente aqui).
 TEST_DESTINATION_SAMPLE: dict[str, Any] = {
     **TEST_SAMPLE_EVENT,
     "target_ip": "179.189.80.242",
@@ -303,6 +344,45 @@ TEST_DESTINATION_SAMPLE: dict[str, Any] = {
     "top_dst_ip": "54.233.253.229",
     "top_dst_port": 53,
     "protocol": "udp",
+    "vector_name": "DNS_SINGLE_FLOW_OUTBOUND",
+    "display_name": "Ataque DNS por fluxo unico",
+    "decoder": "DNS",
+    "classification": "attack",
+    "zone_name": "Clientes FIBINET",
+    "severity": "critical",
+    # Metricas coerentes com a regra real de DNS outbound (5 Kpps warning /
+    # critical), derivadas de uma linha real de producao (6400 pps ~ 3.7 Mbps).
+    "pps": 6400.0,
+    "bps": 3700000.0,
+    "packets_s": 6400.0,
+    "bits_s": 3700000.0,
+    "flows": 1.0,
+    "packets": 384000,
+    "bytes": 27559000,
+    "metric_unit": "packets_s",
+    "observed_value": 6400.0,
+    "threshold_value": 5000.0,
+    "peak_value": 6400.0,
+    "top_packets": 384000,
+    "top_bytes": 27559000,
+    # Janela de tempo no mesmo dia operacional da correlation embutida.
+    "started_at": "2026-10-06T12:14:00Z",
+    "last_seen_at": "2026-10-06T12:14:00Z",
+    "ended_at": "2026-10-06T12:20:00Z",
+    # Sensor real do parque (exportador do pool Fibinet).
+    "sensor": "NE8000-BGP-FIBINET",
+    "sensor_id": 1,
+    "sensor_name": "NE8000-BGP-FIBINET",
+    "exporter_ip": "179.189.80.0",
+    "sensor_resolution": "single",
+    # Mitigacao de demonstracao coerente com a regra (nao executada).
+    "mitigation_basis": "dns_outbound_conversation",
+    "mitigation_reason": "Conversa UDP/53 unica acima de 5 Kpps; classificacao deterministica critical.",
+    "mitigation_status": "not_executed",
+    "summary": (
+        "Possivel abuso DNS detectado: o IP 179.189.80.242, pertencente a zona "
+        "Clientes FIBINET, transmitiu 6.4 Kpps ou 3.7 Mbps em trafego DNS."
+    ),
     "source_name": "Evento manual de teste",
     "source_engine": "gmjflow",
     "source_id": "test",
@@ -1346,21 +1426,45 @@ def dispatch_media_event(
     return summary
 
 
+ANOMALY_PAYLOAD_TABLES = ("anomaly_events", "security_anomalies")
+
+
+def load_anomaly_payload(
+    conn: sqlite3.Connection,
+    anomaly_table: str,
+    anomaly_id: int,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Carrega uma anomalia real e monta o `data` do webhook de midia.
+
+    Usa o MESMO caminho do envio real: with_sensor_fields -> anomaly_event_data
+    -> enrich_payload_with_correlation (resolver canonico do core, sem
+    recalculo). Somente leitura: nao grava, nao altera ocorrencias, nao aciona
+    mitigacao. Devolve (data, row) ou (None, None) quando nao existe.
+    """
+    table = clean_text(anomaly_table)
+    if table not in ANOMALY_PAYLOAD_TABLES:
+        raise ValueError(f"tabela de anomalia nao suportada: {table}")
+    parsed_id = _as_int(anomaly_id)
+    if parsed_id <= 0:
+        raise ValueError("anomaly_id invalido")
+    row = conn.execute(f"SELECT * FROM {table} WHERE id = ?", (parsed_id,)).fetchone()
+    if row is None:
+        return None, None
+    row = with_sensor_fields(conn, row)
+    data = anomaly_event_data(row)
+    # Correlation canonica do core: apenas propagada (sem recalculo).
+    data = enrich_payload_with_correlation(conn, data, table=table, anomaly_id=parsed_id, anomaly=dict(row))
+    return data, dict(row)
+
+
 def dispatch_anomaly_detected(conn: sqlite3.Connection, anomaly_ids: Iterable[int]) -> dict[str, Any]:
     """Dispara `anomaly_detected` para ids de anomaly_events ja persistidos."""
     result: dict[str, Any] = {"event_type": "anomaly_detected", "sent": 0, "errors": []}
     for anomaly_id in list(anomaly_ids or []):
         try:
-            row = conn.execute("SELECT * FROM anomaly_events WHERE id = ?", (int(anomaly_id),)).fetchone()
-            if row is not None:
-                row = with_sensor_fields(conn, row)
-            if row is None:
+            data, _row = load_anomaly_payload(conn, "anomaly_events", int(anomaly_id))
+            if data is None:
                 continue
-            data = anomaly_event_data(row)
-            # Correlation canonica do core: apenas propagada (sem recalculo).
-            data = enrich_payload_with_correlation(
-                conn, data, table="anomaly_events", anomaly_id=int(anomaly_id), anomaly=dict(row)
-            )
             dispatch_media_event("anomaly_detected", data, event_id=int(anomaly_id), severity=data.get("severity"))
             result["sent"] += 1
         except Exception as exc:
@@ -1373,16 +1477,9 @@ def dispatch_security_anomaly_detected(conn: sqlite3.Connection, anomaly_ids: It
     result: dict[str, Any] = {"event_type": "anomaly_detected", "sent": 0, "errors": []}
     for anomaly_id in list(anomaly_ids or []):
         try:
-            row = conn.execute("SELECT * FROM security_anomalies WHERE id = ?", (int(anomaly_id),)).fetchone()
-            if row is not None:
-                row = with_sensor_fields(conn, row)
-            if row is None:
+            data, _row = load_anomaly_payload(conn, "security_anomalies", int(anomaly_id))
+            if data is None:
                 continue
-            data = anomaly_event_data(row)
-            # Correlation canonica do core: apenas propagada (sem recalculo).
-            data = enrich_payload_with_correlation(
-                conn, data, table="security_anomalies", anomaly_id=int(anomaly_id), anomaly=dict(row)
-            )
             dispatch_media_event("anomaly_detected", data, event_id=int(anomaly_id), severity=data.get("severity"))
             result["sent"] += 1
         except Exception as exc:
@@ -1390,24 +1487,43 @@ def dispatch_security_anomaly_detected(conn: sqlite3.Connection, anomaly_ids: It
     return result
 
 
-def test_media_integration(integration: Any, *, sample_data: dict[str, Any] | None = None) -> dict[str, Any]:
+def test_media_integration(
+    integration: Any,
+    *,
+    sample_data: dict[str, Any] | None = None,
+    payload_data: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Envia um payload de exemplo para um destino. Sincrono, para a tela de teste.
 
-    O sample padrao (TEST_DESTINATION_SAMPLE) segue o mesmo formato logico de
-    uma anomalia real e passa pelo MESMO enriquecimento CGNAT do envio real e
-    do preview (enrich_payload_with_cgnat -> enrich_anomaly_event_with_cgnat);
-    nenhuma regra de lookup e duplicada aqui.
+    Dois modos:
+      - evento padrao (sem payload_data): sample sintetico COMPLETO
+        (TEST_DESTINATION_SAMPLE) que passa pelo MESMO pipeline do envio real
+        (template do destino + enrich_payload_with_cgnat + correlation). Se o
+        resolver CGNAT real nao encontrar o mapeamento, usa o fallback de
+        demonstracao TEST_SAMPLE_CGNAT (o evento padrao nunca sai sem CGNAT).
+        `sample_data` sobrescreve os campos informados (uso interno/testes);
+        - anomalia existente (payload_data): o dict recebido substitui o sample
+        (sem merge) e chega pronto pelo MESMO caminho do envio real
+        (load_anomaly_payload: sensor -> anomaly_event_data -> correlation do
+        core). Nada e recalculado aqui.
+
+    Devolve o resultado do POST acrescido do envelope efetivamente enviado em
+    `payload`. Nunca grava anomalia, ocorrencia ou mitigacao.
     """
     item = dict(integration)
     try:
         url = validate_webhook_url(item.get("url"))
     except MediaUrlError as exc:
         return {"ok": False, "http_status": 0, "duration_ms": 0, "error": str(exc)}
-    sample = dict(TEST_DESTINATION_SAMPLE)
-    if sample_data:
-        sample.update({key: value for key, value in dict(sample_data).items() if value is not None})
+    sample_is_standard = payload_data is None
+    if sample_is_standard:
+        sample = dict(TEST_DESTINATION_SAMPLE)
+        if sample_data:
+            sample.update({key: value for key, value in dict(sample_data).items() if value is not None})
+        else:
+            sample["severity"] = normalize_severity(item.get("minimum_severity"))
     else:
-        sample["severity"] = normalize_severity(item.get("minimum_severity"))
+        sample = dict(payload_data)
     cgnat_block: dict[str, Any] | None = None
     try:
         conn = connect()
@@ -1418,6 +1534,20 @@ def test_media_integration(integration: Any, *, sample_data: dict[str, Any] | No
             conn.close()
     except Exception:
         cgnat_block = None
+    if cgnat_block is None and sample_is_standard and not sample_data:
+        # Evento padrao: garante o CGNAT de demonstracao mesmo sem match vivo.
+        cgnat_block = dict(TEST_SAMPLE_CGNAT)
+        sample.update(
+            {
+                "cgnat_resolved": True,
+                "cgnat_public_ip": cgnat_block["public_ip"],
+                "cgnat_public_port": cgnat_block["public_port"],
+                "cgnat_private_ip": cgnat_block["private_ip"],
+                "cgnat_pool_name": cgnat_block["pool_name"],
+                "cgnat_device_name": cgnat_block["device_name"],
+                "cgnat_confidence": cgnat_block["confidence"],
+            }
+        )
     template = clean_text(item.get("payload_template")) or DEFAULT_PAYLOAD_TEMPLATE
     try:
         envelope = render_payload_from_template(template, sample, event_type="anomaly_detected", is_test=True)
@@ -1427,7 +1557,9 @@ def test_media_integration(integration: Any, *, sample_data: dict[str, Any] | No
         )
     envelope = inject_cgnat_block(envelope, cgnat_block)
     envelope = inject_correlation_block(envelope, sample.get("correlation"))
-    return post_json(url, envelope, integration_headers(item), normalize_timeout(item.get("timeout_seconds")))
+    result = post_json(url, envelope, integration_headers(item), normalize_timeout(item.get("timeout_seconds")))
+    result["payload"] = envelope
+    return result
 
 
 # ---------------------------------------------------------------------------
