@@ -29058,6 +29058,19 @@ class MediaPayloadTemplatePayload(BaseModel):
     template: str = ""
 
 
+class MediaDestinationTestPayload(BaseModel):
+    """Corpo opcional do teste por destino (botao "Testar destino").
+
+    source="standard" (padrao): evento padrao COMPLETO.
+    source="existing": usa a anomalia real indicada por anomaly_id/
+    anomaly_table (anomaly_events ou security_anomalies).
+    """
+
+    source: str = "standard"
+    anomaly_id: int | None = None
+    anomaly_table: str | None = None
+
+
 @app.post("/api/media/test-event")
 def media_test_event(payload: MediaTestEventPayload, request: Request):
     """Envia um evento FALSO (test=true) para os webhooks ativos de anomaly_detected.
@@ -29281,6 +29294,132 @@ def list_media(request: Request):
         }
 
 
+@app.get("/api/media/anomalies")
+def media_anomaly_candidates(
+    request: Request,
+    limit: int = Query(20, ge=1, le=50),
+    hours: int = Query(48, ge=1, le=168),
+    q: str | None = None,
+    severity: str | None = None,
+):
+    """Anomalias recentes para o seletor de "Testar destino" (somente leitura).
+
+    Devolve os campos enxutos usados na lista (severidade, vector, IP alvo,
+    horario, status) e anexa a correlation canonica do core
+    (anomaly_correlation) quando existir — nenhuma correlacao e recalculada
+    aqui. Nao grava nada.
+    """
+    require_permission(request, "settings.manage")
+    ensure_sensor_db()
+    since = iso(datetime.now(timezone.utc) - timedelta(hours=int(hours)))
+    search = clean_text(q)
+    severity_filter = clean_text(severity).lower()
+    items: list[dict[str, Any]] = []
+    security_items: list[dict[str, Any]] = []
+    with sqlite_connection() as conn:
+        clauses = ["e.last_seen_at >= ?"]
+        values: list[Any] = [since]
+        if search:
+            clauses.append(
+                "lower(COALESCE(e.target_ip, '') || ' ' || COALESCE(e.top_src_ip, '') || ' ' || "
+                "COALESCE(e.top_dst_ip, '') || ' ' || COALESCE(e.vector_name, '') || ' ' || "
+                "COALESCE(v.display_name, '') || ' ' || COALESCE(e.zone_name, '')) LIKE ? ESCAPE '\\'"
+            )
+            values.append(anomaly_sql_like_value(search))
+        if severity_filter:
+            clauses.append("lower(e.severity) = ?")
+            values.append(severity_filter)
+        rows = conn.execute(
+            f"""
+            SELECT e.id, e.severity, e.vector_name, e.target_ip, e.target_port, e.direction,
+                   e.status, e.started_at, e.last_seen_at, e.ended_at, e.zone_name,
+                   v.display_name AS vector_display_name, s.name AS sensor_name
+            FROM anomaly_events e
+            LEFT JOIN attack_vectors v ON v.id = e.attack_vector_id
+            LEFT JOIN sensors s ON s.id = e.sensor_id
+            WHERE {" AND ".join(clauses)}
+            ORDER BY e.last_seen_at DESC, e.id DESC
+            LIMIT ?
+            """,
+            (*values, int(limit)),
+        ).fetchall()
+        for row in rows:
+            items.append(
+                {
+                    "table": "anomaly_events",
+                    "id": int(row["id"]),
+                    "severity": clean_text(row["severity"]),
+                    "vector_name": clean_text(row["vector_name"]),
+                    "display_name": clean_text(row["vector_display_name"]) or clean_text(row["vector_name"]),
+                    "target_ip": clean_text(row["target_ip"]),
+                    "target_port": int(row["target_port"]) if row["target_port"] is not None else None,
+                    "direction": clean_text(row["direction"]),
+                    "status": clean_text(row["status"]),
+                    "zone_name": clean_text(row["zone_name"]),
+                    "started_at": clean_text(row["started_at"]),
+                    "last_seen_at": clean_text(row["last_seen_at"]),
+                    "ended_at": clean_text(row["ended_at"]),
+                    "sensor_name": clean_text(row["sensor_name"]),
+                    "source": "anomaly_events",
+                }
+            )
+        sec_clauses = ["last_seen >= ?"]
+        sec_values: list[Any] = [since]
+        if search:
+            sec_clauses.append(
+                "lower(COALESCE(target_ip, '') || ' ' || COALESCE(src_ip, '') || ' ' || "
+                "COALESCE(dst_ip, '') || ' ' || COALESCE(vector, '') || ' ' || COALESCE(zone_name, '')) LIKE ? ESCAPE '\\'"
+            )
+            sec_values.append(anomaly_sql_like_value(search))
+        if severity_filter:
+            sec_clauses.append("lower(severity) = ?")
+            sec_values.append(severity_filter)
+        try:
+            sec_rows = conn.execute(
+                f"""
+                SELECT id, severity, vector, src_ip, dst_ip, target_ip, direction,
+                       status, first_seen, last_seen, ended_at, zone_name
+                FROM security_anomalies
+                WHERE {" AND ".join(sec_clauses)}
+                ORDER BY last_seen DESC, id DESC
+                LIMIT ?
+                """,
+                (*sec_values, int(limit)),
+            ).fetchall()
+        except sqlite3.Error:
+            sec_rows = []
+        for row in sec_rows:
+            security_items.append(
+                {
+                    "table": "security_anomalies",
+                    "id": int(row["id"]),
+                    "severity": clean_text(row["severity"]),
+                    "vector_name": clean_text(row["vector"]),
+                    "display_name": clean_text(row["vector"]),
+                    "target_ip": clean_text(row["target_ip"]) or clean_text(row["src_ip"]),
+                    "target_port": None,
+                    "direction": clean_text(row["direction"]),
+                    "status": clean_text(row["status"]),
+                    "zone_name": clean_text(row["zone_name"]),
+                    "started_at": clean_text(row["first_seen"]),
+                    "last_seen_at": clean_text(row["last_seen"]),
+                    "ended_at": clean_text(row["ended_at"]),
+                    "sensor_name": "",
+                    "source": "security_anomalies",
+                }
+            )
+        anomaly_correlation.attach_correlation_to_anomaly_items(conn, items)
+        anomaly_correlation.attach_correlation_to_anomaly_items(conn, security_items, table="security_anomalies")
+    merged = [*items, *security_items]
+    merged.sort(key=lambda item: (clean_text(item.get("last_seen_at")), int(item.get("id") or 0)), reverse=True)
+    return {
+        "items": merged[: int(limit)],
+        "hours": int(hours),
+        "timezone": ANOMALY_TIME_ZONE_NAME,
+        "fetched_at": utc_now_iso(),
+    }
+
+
 @app.post("/api/media", status_code=201)
 def create_media(payload: MediaIntegrationPayload, request: Request):
     require_permission(request, "settings.manage")
@@ -29353,15 +29492,55 @@ def delete_media(media_id: int, request: Request):
 
 
 @app.post("/api/media/{media_id}/test")
-def test_media(media_id: int, request: Request):
-    """Envia payload de exemplo e devolve status HTTP, duracao e erro."""
+def test_media(media_id: int, request: Request, payload: MediaDestinationTestPayload | None = None):
+    """Envia payload de teste para o destino e devolve status HTTP, duracao e erro.
+
+    Modos (body opcional):
+      - source="standard" (padrao): evento padrao COMPLETO, pelo MESMO pipeline
+        do envio real (template do destino + CGNAT + correlation);
+      - source="existing": usa uma anomalia REAL (anomaly_events ou
+        security_anomalies) carregada pelo MESMO caminho do envio real
+        (load_anomaly_payload).
+    Somente o last_test_* do proprio destino e atualizado; nenhuma anomalia,
+    ocorrencia ou mitigacao e criada/alterada.
+    """
     require_permission(request, "settings.manage")
     ensure_sensor_db()
+    source = clean_text(getattr(payload, "source", "") or "standard").lower()
+    if source not in {"standard", "existing"}:
+        raise HTTPException(status_code=400, detail="source invalido (use standard ou existing)")
+    anomaly_ref: dict[str, Any] | None = None
     with sqlite_connection() as conn:
         row = conn.execute("SELECT * FROM media_integrations WHERE id = ?", (media_id,)).fetchone()
         if row is None:
             raise HTTPException(status_code=404, detail="Midia nao encontrada")
-        result = media_dispatch.test_media_integration(row)
+        if source == "existing":
+            anomaly_table = clean_text(getattr(payload, "anomaly_table", "")) or "anomaly_events"
+            anomaly_id = int(getattr(payload, "anomaly_id", 0) or 0)
+            if anomaly_id <= 0:
+                raise HTTPException(status_code=400, detail="anomaly_id obrigatorio para source=existing")
+            if anomaly_table not in media_dispatch.ANOMALY_PAYLOAD_TABLES:
+                raise HTTPException(
+                    status_code=400,
+                    detail="anomaly_table invalida (use anomaly_events ou security_anomalies)",
+                )
+            data, _anomaly_row = media_dispatch.load_anomaly_payload(conn, anomaly_table, anomaly_id)
+            if data is None:
+                raise HTTPException(status_code=404, detail="Anomalia nao encontrada")
+            result = media_dispatch.test_media_integration(row, payload_data=data)
+            correlation = data.get("correlation") if isinstance(data.get("correlation"), dict) else {}
+            anomaly_ref = {
+                "table": anomaly_table,
+                "id": anomaly_id,
+                "severity": clean_text(data.get("severity")),
+                "vector_name": clean_text(data.get("vector_name")),
+                "target_ip": clean_text(data.get("target_ip")),
+                "status": clean_text(data.get("status")),
+                "is_recurrence": bool(correlation.get("is_recurrence")),
+                "occurrence_number_today": correlation.get("occurrence_number_today"),
+            }
+        else:
+            result = media_dispatch.test_media_integration(row)
         conn.execute(
             """
             UPDATE media_integrations
@@ -29379,7 +29558,10 @@ def test_media(media_id: int, request: Request):
             ),
         )
         conn.commit()
-        return {"id": media_id, **result}
+    response = {"id": media_id, "source": source, **result}
+    if anomaly_ref is not None:
+        response["anomaly"] = anomaly_ref
+    return response
 
 
 @app.get("/api/media/{media_id}/logs")

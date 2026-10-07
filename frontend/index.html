@@ -9288,6 +9288,42 @@ Webhook e integração de mídia funcionando.</textarea></div>
             </div>
           </div>
         </div>
+        <div id="mediaTestDestinationModal" class="gmj-modal" role="dialog" aria-modal="true" aria-labelledby="mediaTestDestinationTitle">
+          <div class="gmj-dialog small">
+            <div class="gmj-dialog-header">
+              <h2 id="mediaTestDestinationTitle" class="view-title">Testar destino</h2>
+              <button type="button" class="icon-button" data-close-modal="mediaTestDestinationModal" aria-label="Fechar"><i data-lucide="x"></i></button>
+            </div>
+            <div class="gmj-dialog-body">
+              <div class="d-flex flex-column gap-2">
+                <div id="mediaTestDestinationHint" class="subtle">—</div>
+                <div class="field">
+                  <label>Fonte do evento</label>
+                  <label class="form-check"><input type="radio" class="form-check-input" name="mediaTestSource" value="standard" checked><span class="form-check-label">Gerar evento padrão (completo — inclui CGNAT e reincidência de demonstração)</span></label>
+                  <label class="form-check"><input type="radio" class="form-check-input" name="mediaTestSource" value="existing"><span class="form-check-label">Usar anomalia existente (payload real, mesmo pipeline do envio)</span></label>
+                </div>
+                <div id="mediaTestStandardPane" class="subtle">Evento sintético no formato real de uma anomalia de DNS outbound, com os mesmos enriquecimentos do envio (template do destino, CGNAT e correlation). Não grava anomalia e não aciona mitigação.</div>
+                <div id="mediaTestExistingPane" class="d-none">
+                  <div class="toolbar" style="gap:6px;">
+                    <input id="mediaTestAnomalySearch" class="form-control form-control-sm" placeholder="Buscar por IP, vector ou zona" style="max-width:300px;">
+                    <button id="mediaTestAnomalySearchButton" type="button" class="btn btn-sm btn-outline-secondary">Buscar</button>
+                  </div>
+                  <div id="mediaTestAnomalyStatus" class="subtle mt-1"></div>
+                  <div id="mediaTestAnomalyList" style="max-height:260px; overflow:auto; margin-top:6px; display:flex; flex-direction:column; gap:6px;"></div>
+                </div>
+                <div id="mediaTestDestinationStatus" class="subtle"></div>
+                <div class="toolbar">
+                  <button id="mediaTestDestinationSendButton" type="button" class="btn btn-sm btn-success"><i data-lucide="send"></i><span>Enviar teste</span></button>
+                  <button type="button" class="btn btn-sm btn-outline-secondary" data-close-modal="mediaTestDestinationModal">Fechar</button>
+                </div>
+                <details id="mediaTestDestinationPayloadBox" class="d-none">
+                  <summary class="subtle">Payload enviado</summary>
+                  <pre id="mediaTestDestinationPayload" class="subtle mt-1" style="max-height:280px; overflow:auto; font-size:11px; padding:8px; border:1px solid var(--border); border-radius:6px; margin-bottom:0;">—</pre>
+                </details>
+              </div>
+            </div>
+          </div>
+        </div>
         <section id="view-placeholder" class="app-view">
           <div class="panel placeholder-panel p-4">
             <div>
@@ -32455,16 +32491,135 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       }
     }
 
-    async function testMedia(id) {
+    let mediaTestDestinationId = null;
+
+    function mediaTestDestinationSource() {
+      const checked = document.querySelector('input[name="mediaTestSource"]:checked');
+      return checked ? checked.value : 'standard';
+    }
+
+    function mediaTestDestinationApplyMode() {
+      const mode = mediaTestDestinationSource();
+      document.getElementById('mediaTestStandardPane').classList.toggle('d-none', mode !== 'standard');
+      document.getElementById('mediaTestExistingPane').classList.toggle('d-none', mode !== 'existing');
+      if (mode === 'existing') {
+        loadMediaTestAnomalies().catch(error => setText('mediaTestAnomalyStatus', `Falha: ${error.message}`));
+      }
+    }
+
+    async function openMediaTestDestinationModal(id) {
       const info = mediaItems.find(item => Number(item.id) === Number(id));
-      setText('mediaViewStatus', `Testando ${info?.name || 'destino'}…`);
+      if (!info) return;
+      mediaTestDestinationId = Number(id);
+      setText('mediaTestDestinationTitle', `Testar destino — ${info.name || `#${id}`}`);
+      setText('mediaTestDestinationHint', 'O envio é apenas um teste: nada é gravado como anomalia, nenhuma ocorrência é criada e nenhuma mitigação é acionada.');
+      document.querySelectorAll('input[name="mediaTestSource"]').forEach(input => { input.checked = input.value === 'standard'; });
+      document.getElementById('mediaTestAnomalySearch').value = '';
+      document.getElementById('mediaTestAnomalyList').innerHTML = '';
+      setText('mediaTestAnomalyStatus', '');
+      setText('mediaTestDestinationStatus', '');
+      const payloadBox = document.getElementById('mediaTestDestinationPayloadBox');
+      payloadBox.classList.add('d-none');
+      payloadBox.open = false;
+      document.getElementById('mediaTestDestinationPayload').textContent = '—';
+      document.getElementById('mediaTestStandardPane').classList.remove('d-none');
+      document.getElementById('mediaTestExistingPane').classList.add('d-none');
+      openModal('mediaTestDestinationModal');
+    }
+
+    function mediaTestAnomalyRecurrenceText(correlation) {
+      if (!correlation || typeof correlation !== 'object') return '';
+      if (correlation.is_recurrence) {
+        const number = Number(correlation.occurrence_number_today || 0) || '—';
+        const previous = correlation.last_previous_occurrence_at
+          ? ` · última ${formatDateTime(correlation.last_previous_occurrence_at)}`
+          : '';
+        return `Reincidência: ${number}ª ocorrência hoje${previous}`;
+      }
+      return 'Primeira ocorrência do dia';
+    }
+
+    function renderMediaTestAnomalies(items) {
+      const list = document.getElementById('mediaTestAnomalyList');
+      if (!Array.isArray(items) || !items.length) {
+        list.innerHTML = '<div class="subtle">Nenhuma anomalia encontrada no período.</div>';
+        return;
+      }
+      list.innerHTML = items.map(item => {
+        const severity = String(item.severity || 'info').toLowerCase();
+        const severityClass = severity === 'critical' ? 'text-danger' : severity === 'warning' ? 'text-warning' : 'text-secondary';
+        const value = `${item.table}:${item.id}`;
+        const target = item.target_ip
+          ? `${escapeHtml(item.target_ip)}${item.target_port ? `:${item.target_port}` : ''}`
+          : '—';
+        const recurrence = mediaTestAnomalyRecurrenceText(item.correlation);
+        return `
+          <label class="form-check" style="border:1px solid var(--border); border-radius:8px; padding:8px 10px; display:block;">
+            <input type="radio" class="form-check-input" name="mediaTestAnomaly" value="${value}">
+            <span class="form-check-label">
+              <strong class="${severityClass}">[ ${escapeHtml(severity.toUpperCase())} ]</strong>
+              ${escapeHtml(item.display_name || item.vector_name || '—')}
+              <span class="subtle">· ${escapeHtml(item.status || '—')}${item.direction ? ` · ${escapeHtml(item.direction)}` : ''}</span>
+              <div class="subtle">${target}${item.sensor_name ? ` · ${escapeHtml(item.sensor_name)}` : ''} · ${escapeHtml(formatDateTime(item.last_seen_at))}</div>
+              ${recurrence ? `<div class="subtle">${escapeHtml(recurrence)}</div>` : ''}
+            </span>
+          </label>`;
+      }).join('');
+    }
+
+    async function loadMediaTestAnomalies() {
+      setText('mediaTestAnomalyStatus', 'Carregando anomalias recentes…');
+      const params = new URLSearchParams();
+      params.set('limit', '20');
+      params.set('hours', '48');
+      const search = document.getElementById('mediaTestAnomalySearch').value.trim();
+      if (search) params.set('q', search);
+      const payload = await apiRequest(`/api/media/anomalies?${params.toString()}`);
+      const items = Array.isArray(payload?.items) ? payload.items : [];
+      renderMediaTestAnomalies(items);
+      setText('mediaTestAnomalyStatus', items.length
+        ? `${items.length} anomalia(s) recentes (48 h). Selecione uma para enviar o payload real.`
+        : 'Nenhuma anomalia encontrada nas últimas 48 h.');
+    }
+
+    async function sendMediaTestDestination() {
+      if (!mediaTestDestinationId) return;
+      const mode = mediaTestDestinationSource();
+      const body = { source: mode };
+      if (mode === 'existing') {
+        const selected = document.querySelector('input[name="mediaTestAnomaly"]:checked');
+        if (!selected) {
+          setText('mediaTestDestinationStatus', 'Selecione uma anomalia da lista (ou use "Gerar evento padrão").');
+          return;
+        }
+        const [table, anomalyId] = selected.value.split(':');
+        body.anomaly_table = table;
+        body.anomaly_id = Number(anomalyId);
+      }
+      setText('mediaTestDestinationStatus', 'Enviando teste…');
       try {
-        const result = await apiRequest(`/api/media/${id}/test`, { method: 'POST' });
-        const http = result.http_status ? `HTTP ${result.http_status}` : 'sem resposta HTTP';
-        const label = result.ok ? 'Sucesso' : 'Falha';
-        setText('mediaViewStatus', `${label} · ${http} · ${result.duration_ms} ms${result.error ? ` · ${result.error}` : ''}`);
+        const result = await apiRequest(`/api/media/${mediaTestDestinationId}/test`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        const http = result?.http_status ? `HTTP ${result.http_status}` : 'sem resposta HTTP';
+        const label = result?.ok ? 'Sucesso' : 'Falha';
+        const anomalyInfo = result?.anomaly
+          ? ` · anomalia #${result.anomaly.id} (${result.anomaly.vector_name || '—'})`
+          : '';
+        setText('mediaTestDestinationStatus', `${label} · ${http} · ${result?.duration_ms ?? 0} ms${result?.error ? ` · ${result.error}` : ''}${anomalyInfo}`);
+        const box = document.getElementById('mediaTestDestinationPayloadBox');
+        const pre = document.getElementById('mediaTestDestinationPayload');
+        if (result?.payload) {
+          pre.textContent = JSON.stringify(result.payload, null, 2);
+          box.classList.remove('d-none');
+          box.open = true;
+        } else {
+          box.classList.add('d-none');
+        }
       } catch (error) {
-        setText('mediaViewStatus', `Falha no teste: ${error.message}`);
+        setText('mediaTestDestinationStatus', `Falha no teste: ${error.message}`);
       }
       await loadMediaView().catch(() => {});
     }
@@ -32738,6 +32893,15 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       document.getElementById('mediaPayloadValidateButton')?.addEventListener('click', () => mediaPayloadValidate().catch(error => setText('mediaPayloadStatus', `Erro: ${error.message}`)));
       document.getElementById('mediaPayloadTestButton')?.addEventListener('click', () => mediaPayloadSendTest().catch(error => setText('mediaPayloadStatus', `Falha: ${error.message}`)));
       bindMediaTestTools();
+      document.querySelectorAll('input[name="mediaTestSource"]').forEach(input => input.addEventListener('change', () => mediaTestDestinationApplyMode()));
+      document.getElementById('mediaTestAnomalySearchButton')?.addEventListener('click', () => loadMediaTestAnomalies().catch(error => setText('mediaTestAnomalyStatus', `Falha: ${error.message}`)));
+      document.getElementById('mediaTestAnomalySearch')?.addEventListener('keydown', event => {
+        if (event.key === 'Enter') {
+          event.preventDefault();
+          loadMediaTestAnomalies().catch(error => setText('mediaTestAnomalyStatus', `Falha: ${error.message}`));
+        }
+      });
+      document.getElementById('mediaTestDestinationSendButton')?.addEventListener('click', () => sendMediaTestDestination().catch(error => setText('mediaTestDestinationStatus', `Falha: ${error.message}`)));
       document.getElementById('mediaTable')?.addEventListener('click', event => {
         const target = event.target instanceof Element ? event.target : event.target.parentElement;
         const button = target?.closest('.media-action');
@@ -32745,7 +32909,7 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         const id = Number(button.dataset.id);
         const action = button.dataset.mediaAction;
         if (action === 'edit') openMediaModal(mediaItems.find(item => Number(item.id) === id) || null).catch(error => setText('mediaViewStatus', `Falha: ${error.message}`));
-        if (action === 'test') testMedia(id).catch(error => setText('mediaViewStatus', `Falha: ${error.message}`));
+        if (action === 'test') openMediaTestDestinationModal(id).catch(error => setText('mediaViewStatus', `Falha: ${error.message}`));
         if (action === 'logs') loadMediaLogs(id).catch(error => setText('mediaLogsStatus', `Falha: ${error.message}`));
         if (action === 'toggle') apiRequest(`/api/media/${id}/toggle`, { method: 'POST' }).then(() => loadMediaView()).catch(error => setText('mediaViewStatus', `Falha: ${error.message}`));
         if (action === 'delete') {
