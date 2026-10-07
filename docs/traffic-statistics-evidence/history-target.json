@@ -1,0 +1,31 @@
+{
+  "scope": {
+    "type": "target",
+    "id": "::ffff:179.189.83.202",
+    "sensor": "NE8000-BGP-FIBINET",
+    "exporter": "",
+    "direction": "both"
+  },
+  "window": "5m",
+  "field": "src_ip",
+  "items": [
+    {
+      "timestamp": "2026-10-06T22:37:00+00:00",
+      "field": "src_ip",
+      "weight_mode": "PACKET_WEIGHTED",
+      "samples": 1798.0,
+      "cardinality": 130,
+      "entropy_bits": 4.749091992293792,
+      "entropy_normalized": 0.6762807244990642,
+      "hmax": 7.022367813028454,
+      "distribution_classification": "MIXED",
+      "baseline_samples": 0,
+      "baseline_median": null,
+      "baseline_mad": null,
+      "delta": null,
+      "robust_z": null,
+      "regularized_z": null,
+      "anomaly_classification": "NO_BASELINE"
+    }
+  ]
+}

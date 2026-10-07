@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>GMJ-FLOW — entrega da análise estatística de tráfego</title>
+<style>body{font:16px/1.6 system-ui,sans-serif;color:#172b3b;background:#f5f7fa;margin:0}main{max-width:1080px;margin:32px auto;padding:36px;background:white;border-radius:14px}h1{line-height:1.2}h2{margin-top:34px;font-size:23px;color:#126a67}table{border-collapse:collapse;width:100%;font-size:14px}td,th{border-bottom:1px solid #dce3e9;text-align:left;padding:10px;vertical-align:top}code,pre{background:#eef2f6;border-radius:5px}code{padding:2px 5px;overflow-wrap:anywhere}pre{padding:16px;overflow:auto;font-size:13px}a{color:#006a87}img{max-width:100%;border:1px solid #dce3e9}.status{padding:18px;background:#e8f5f2;border-left:4px solid #16796d}.muted{color:#526578}@media(max-width:600px){main{margin:0;padding:18px}table{font-size:12px}td,th{padding:6px}}</style></head>
+<body><main>
+<h1>Análise estatística de tráfego — GMJ-FLOW</h1>
+<p class="muted">Entrega de desenvolvimento em 06/10/2026 · Servidor 172.20.10.40 · Horários da interface: America/Sao_Paulo; API: UTC.</p>
+<div class="status"><strong>Implementado e validado em branch isolada. Ainda não ativado em produção.</strong><br>
+Branch <code>feature/threat-statistics</code>, diretório <code>/root/gmj-flow-statistics-dev</code>, a partir de <code>baf3de08e599b769574263ee2af6f6eadd652766</code>.
+Nenhum serviço de produção reiniciado, nenhuma alteração de detecção/mitigação aplicada. Imagem candidata: <code>gmj-flow-statistics-candidate:latest</code>.</div>
+
+<h2>1. Estado anterior e auditoria</h2>
+<p>Produção em <code>/home/guilherme/GMJ-FLOW</code>, FastAPI/Python 3.12, ClickHouse 24.8, SQLite para configurações e análises, frontend HTML/JavaScript com Bootstrap e ECharts. O hash SHA-256 do <code>main.py</code> do contêiner ativo foi comparado ao arquivo do repositório: são idênticos. As alterações locais anteriores em <code>C:\projetos\GMJ-FLOW</code> foram preservadas.</p>
+<p>A tabela real é <code>flowdb.flow_raw</code>, MergeTree, particionada por <code>toDate(flow_time)</code>, ordenada por <code>(sensor, flow_time, src_ip, dst_ip, proto, dst_port)</code>. A retenção instalada é <strong>96 horas</strong>, embora o SQL de instalação tenha outro padrão. Foram auditados APIs, autenticação/RBAC, cache de dashboard, padrões SQLite, componentes de Threat Intelligence, workers existentes e testes.</p>
+<p>Campos temporais: <code>flow_time DateTime64(3,'UTC')</code>, <code>received_at DateTime</code>, <code>flow_start/flow_end Nullable(DateTime64)</code>, <code>duration_ms UInt64</code>. Contadores: <code>bytes/packets/flow_count UInt64</code>, <code>sample_rate UInt32</code>. Sensor é LowCardinality(String); exporter e IPs são IPv6, incluindo IPv4 mapeado. Há ASN de origem/destino e nomes de AS. <strong>Não há país nem payload no schema.</strong></p>
+<p>A primeira leitura de cinco minutos contou 15.401.253 registros, sem duração positiva ou par start/end válido. As consultas analíticas mantêm o filtro existente <code>time_classification='VALID_TIME'</code>; registros em quarentena temporal não entram nos resultados. A amostra global final elegível teve 1.123.407 registros.</p>
+
+<h2>2. Arquivos alterados/adicionados</h2>
+<table><tr><th>Arquivo</th><th>Função</th></tr>
+<tr><td><code>backend/app/main.py</code></td><td>Somente import e inclusão do novo router, duas linhas.</td></tr>
+<tr><td><code>backend/requirements.txt</code></td><td>Adição de scipy==1.15.3.</td></tr>
+<tr><td><code>backend/app/api/traffic_statistics.py</code></td><td>Endpoints, validação e schemas Pydantic de resposta.</td></tr>
+<tr><td><code>backend/app/services/traffic_statistics_math.py</code></td><td>Shannon, baseline, K-S, Benford, thresholds e agregação overall.</td></tr>
+<tr><td><code>backend/app/services/traffic_statistics.py</code></td><td>Consultas, scopes, amostragem, cache e persistência.</td></tr>
+<tr><td><code>backend/app/services/traffic_statistics_worker.py</code></td><td>Coletor analítico opcional, separado dos workers existentes.</td></tr>
+<tr><td><code>frontend/index.html</code>, <code>frontend/threat-intelligence.js</code>, <code>frontend/threat-intelligence.css</code></td><td>Painel com componentes e assets já usados. Finais de linha originais preservados.</td></tr>
+<tr><td><code>docker-compose.statistics.yml</code></td><td>Profile opcional de coleta, limites de CPU/memória e volume analítico dedicado.</td></tr>
+<tr><td><code>deploy/Dockerfile.statistics-validation</code></td><td>Ambiente isolado de testes, sem inicializar a aplicação principal.</td></tr>
+<tr><td><code>tests/test_traffic_statistics.py</code>, <code>tests/test_traffic_statistics_auth.py</code>, <code>tests/traffic_statistics_frontend_harness.js</code></td><td>Matemática, persistência, API, isolamento, autenticação e frontend.</td></tr>
+<tr><td><code>scripts/validate_traffic_statistics.py</code></td><td>Validação reproduzível com flows reais e geração dos JSONs.</td></tr>
+<tr><td><code>docs/traffic-statistics-report.html</code> e <code>docs/traffic-statistics-evidence/</code></td><td>Relatório, capturas e respostas reais.</td></tr></table>
+
+<h2>3. Persistência e migrations</h2>
+<p>Seguido o padrão de <code>CREATE TABLE IF NOT EXISTS</code> com <code>sqlite_managed.open_managed</code>. O banco analítico é separado do banco operacional, com WAL e busy timeout. Por padrão, fica ao lado do <code>GMJFLOW_DB_PATH</code>, como <code>traffic-statistics.db</code>; pode ser definido por <code>GMJFLOW_STATISTICS_DB_PATH</code>.</p>
+<ul><li><code>threat_statistics_windows</code>: chave primária (scope, seconds, mode, end), resposta JSON com Shannon/baseline, K-S, Benford e metadados.</li>
+<li><code>threat_statistics_samples</code>: chave primária (scope, seconds, end), amostras numéricas compactadas com zlib.</li>
+<li>Índices temporais de retenção; <code>user_version=1</code>; expurgo de registros com mais de oito dias durante novas gravações. Histórico sem novas gravações não recebe expurgo em background.</li></ul>
+<p>As tabelas foram criadas e testadas apenas nos bancos de desenvolvimento. Migration repetida passou no teste de idempotência. <strong>Nenhuma tabela, materialized view, TTL ou migration de ClickHouse foi alterada.</strong></p>
+
+<h2>4. API, permissões e scopes</h2>
+<pre>GET /api/threat-intelligence/statistics/summary
+GET /api/threat-intelligence/statistics/history
+
+scopeType=target | interface | global
+scopeId=&lt;IP ou índice de interface&gt;
+sensor=&lt;nome real&gt;
+exporter=&lt;IP do roteador&gt;
+direction=both | input | output
+window=1m | 5m | 15m | 1h
+weightMode=PACKET_WEIGHTED | FLOW_WEIGHTED
+
+# history também aceita:
+field=src_ip     hours=24  # 1..168</pre>
+<p>Usado o prefixo real de Threat Intelligence para herdar autenticação e permissão <code>anomalies.view</code>. IP alvo inclui origem ou destino. Interface exige sensor + exporter + índice, evitando misturar ifIndex de roteadores distintos. GLOBAL aceita filtro por sensor/exporter. Parâmetros inválidos recebem 422. Falha/limite de consulta recebe 503, nunca um falso NO_DATA. Não existem novos endpoints de escrita ou ação.</p>
+
+<h2>5. Shannon: campos disponíveis</h2>
+<table><tr><th>Campo da API</th><th>Coluna real</th><th>Tipo</th></tr>
+<tr><td>src_ip / dst_ip</td><td>src_ip / dst_ip</td><td>IPv6</td></tr>
+<tr><td>src_port / dst_port</td><td>src_port / dst_port</td><td>UInt16</td></tr>
+<tr><td>protocol</td><td>proto</td><td>UInt8</td></tr>
+<tr><td>tcp_flags</td><td>tcp_flags</td><td>UInt16</td></tr>
+<tr><td>src_asn</td><td>src_asn</td><td>UInt32</td></tr>
+<tr><td>input_interface / output_interface</td><td>input_if / output_if</td><td>UInt32</td></tr></table>
+<p>Nove campos disponíveis; <code>src_country</code> é informado em <code>unavailable_fields</code>. NULLs são excluídos; ASN e interface zero são tratados como informação desconhecida e excluídos. Porta zero e flags zero permanecem categorias válidas. Peso zero não contribui. A distribuição fica restrita aos valores conhecidos.</p>
+<p><code>PACKET_WEIGHTED</code> usa SUM(packets); <code>FLOW_WEIGHTED</code> usa COUNT de registros, sem multiplicar por flow_count. Não se aplica correção adicional por sample_rate. Shannon é calculado no ClickHouse pela identidade log2(N) − SUM(n·log2(n))/N. Cardinalidade 1 resulta em H=0 e normalizada=0; ausência retorna valores nulos/NO_DATA.</p>
+
+<h2>6. K-S efetivamente disponível</h2>
+<p>Com dados reais: <code>bytes_per_flow</code>, <code>packets_per_flow</code> e <code>avg_packet_size</code>. O termo “flow” da API representa um registro armazenado; a UI usa “registro”, pois o coletor pode agregar fluxos.</p>
+<p><code>flow_duration</code>, <code>bps_per_flow</code> e <code>pps_per_flow</code> são suportados pelos campos reais: duration_ms positivo, com fallback para flow_end &gt; flow_start. Na validação, retornaram zero amostras válidas e INSUFFICIENT_SAMPLES. Não se fabricou duração. Bytes/pacote ignora packets=0.</p>
+<p>SciPy <code>ks_2samp(method='asymp')</code>, mínimo de 30 observações válidas em cada amostra. D determina a classe: &lt;0,10 NORMAL; &lt;0,20 SMALL_SHIFT; &lt;0,35 RELEVANT_SHIFT; a partir de 0,35 STRONG_SHIFT. O p-value é complementar e aproximado, especialmente para contagens discretas, empates e dependência entre flows.</p>
+
+<h2>7. Benford efetivamente disponível</h2>
+<p>Com observações positivas: bytes/registro e pacotes/registro. Duração, bps e pps estão suportados, mas ficaram não aplicáveis por falta de dados. Não aplicado a IP, portas, protocolo, flags nem bytes/pacote.</p>
+<p>Gate inicial: pelo menos 1.000 valores positivos finitos e log10(max/min) ≥ 2. Zero, negativo e NULL são excluídos com contagem explícita. Distribuição esperada log10(1+1/d), d=1..9. Retorna distribuição observada/esperada, χ², p-value (8 graus de liberdade), MAD, amplitude e tamanho da amostra.</p>
+<p>Classificação pelo MAD: &lt;0,012 NORMAL_CONFORMITY; &lt;0,018 MODERATE_DIVERGENCE; ≥0,018 STRONG_DIVERGENCE. χ² e p-value ficam como evidência adicional, sem regra de bloqueio. O gate é uma verificação básica de elegibilidade, não uma prova de que todo tráfego deveria seguir Benford.</p>
+
+<h2>8. Baseline e classificações</h2>
+<p>Histórico móvel de até sete dias de <strong>métricas persistidas</strong>, separado por scope completo, campo, modo de peso e tamanho de janela. O baseline usa janelas alinhadas e não sobrepostas. Só admite janelas cujo fim é anterior ou igual ao início da janela atual, excluindo a janela atual e suas sobreposições.</p>
+<p>Mediana e MAD calculados sobre Shannon normalizada. <code>robust_z=(current−median)/(1.4826·MAD)</code>; delta é retornado separadamente. São necessárias 12 janelas válidas por campo antes de classificar anomalia. Com MAD=0 e delta≠0, robust_z é nulo; com delta=0, é zero. A classificação utiliza <code>regularized_z=delta/max(1.4826·MAD,0.01)</code>: |z| &lt;3 NORMAL; &lt;6 MODERATE; ≥6 STRONG. O piso explícito evita infinitos e alarmes por variações numéricas diminutas.</p>
+<p>Distribuição: &lt;0,25 CONCENTRATED; &lt;0,75 MIXED; ≥0,75 HIGH_DIVERSITY. Alta diversidade não determina anomalia. Todos os limites ficam centralizados em <code>StatisticsConfig</code> e são publicados na resposta.</p>
+<p>O status do baseline expõe WARMING_UP/PARTIAL/READY, número de janelas e extensão temporal disponível. READY requer mínimo de janelas e extensão de pelo menos 6,9 dias; não implica coleta sem lacunas. O exemplo real possui <strong>12 janelas e cobertura parcial de aproximadamente 64 minutos</strong>. O histórico de sete dias se forma após a ativação; não foi inventado nem extraído de flows já expirados.</p>
+<p>Overall é o máximo das classes disponíveis: STRONG/STRONG_SHIFT/STRONG_DIVERGENCE → HIGH; MODERATE/SMALL_SHIFT/RELEVANT_SHIFT/MODERATE_DIVERGENCE → MODERATE; alguma evidência normal e nenhuma superior → NORMAL; sem evidência classificável → INSUFFICIENT_DATA. Não há pesos nem score. A API e UI indicam evidência parcial quando faltam comparações Shannon/K-S.</p>
+
+<h2>9. Amostragem, atualização e cache</h2>
+<p>A janela termina no último minuto completo. A UI atualiza a cada 60 segundos apenas quando a área está ativa, o painel aberto e a aba visível. Respostas da mesma janela ficam persistidas e são reutilizadas inclusive após restart.</p>
+<p>Sem sampling key na tabela: filtro por <code>cityHash64</code> de timestamp, sensor, exporter, IPs, portas, protocolo, contadores, flags e interfaces; limiar calculado pela contagem elegível; seleção ordenada pelo hash com top-k de até 10.000. Não há ORDER BY rand(). Registros estritamente idênticos compartilham hash — limitação sem identificador único no schema.</p>
+<p>O histórico guarda no máximo 512 observações de cada janela alinhada, sem sobreposição, compactadas. Seleção por prioridade SHA-256 e limite de 20.000 observações no baseline. Isso representa estratos temporais, não ponderação pelo volume de tráfego de cada janela. O baseline numérico exclui qualquer janela sobreposta e tem cache de cinco minutos via MemoryDashboardCache existente. Não há varredura automática de sete dias de flow_raw.</p>
+<p>Coletor opcional <code>python -m app.services.traffic_statistics_worker</code>: configuração JSON <code>GMJFLOW_STATISTICS_SCOPES</code> com 1..8 scopes, janela 5m, modo PACKET_WEIGHTED, ciclo de um minuto. Não foi ativado. FLOW_WEIGHTED e outras janelas ficam disponíveis sob demanda via API. A ausência de coleta aparece como lacuna no gráfico.</p>
+
+<h2>10. Performance observada</h2>
+<table><tr><th>Escopo</th><th>Registros válidos / 5m</th><th>Resumo</th><th>Repetição da janela</th></tr>
+<tr><td>IP alvo</td><td>643</td><td>0,833 s</td><td>11 ms</td></tr>
+<tr><td>Interface</td><td>183.011</td><td>2,288 s, incluindo primeiro carregamento SciPy nessa execução</td><td>12 ms</td></tr>
+<tr><td>Global</td><td>1.123.407</td><td>1,197 s</td><td>14 ms</td></tr></table>
+<p>Consultas Shannon globais: aproximadamente 52–113 ms por campo; contagem: 33 ms; amostragem: 332 ms. Rodada anterior: interface 0,83 s; global 1,10 s. Cada resposta inclui os tempos por query. Medições pontuais, não um teste prolongado de carga.</p>
+<p>Filtros temporais em PREWHERE, partições diárias e sensor quando informado. Limites por consulta: readonly=1, duas threads, 15 segundos, 512 MiB, máximo de 100 milhões de linhas lidas; estouro gera erro, sem resultado parcial. Um lock por processo serializa os cálculos. Primeira solicitação simultânea em processos diferentes ainda pode duplicar trabalho antes da persistência; a chave primária impede duplicar snapshots.</p>
+
+<h2>11. Testes e regressão</h2>
+<ul><li><strong>85 testes aprovados</strong>: 30 testes novos de matemática/serviço/API; três de autenticação/rotas; regressão de frontend Threat Intelligence e autenticação/RBAC.</li>
+<li>Cobertos Shannon uniforme/concentrado/vazio/NULL e pesos; mediana/MAD/outliers/MAD zero/exclusão de sobreposição; K-S igual/diferente/pouca amostra/NaN; Benford compatível/divergente/pouca amostra/faixa estreita/zeros/negativos; cache, scopes, validação, migration e isolamento de dependências.</li>
+<li>Nove verificações do harness JavaScript passaram. Playwright validou desktop 1440px e celular 390px, nove campos Shannon, seis linhas K-S, seleção de histórico, erro sem dados antigos e ausência de overflow horizontal; zero page errors.</li>
+<li>A suíte adicional de Threat Intelligence teve 15 aprovações e duas falhas CEREAL2. Repetida no código original sem a feature: <strong>as mesmas duas falhas</strong>, relacionadas às fixtures de eventos antigos. Não alteradas para encobrir resultados.</li>
+<li>Endpoints existentes continuam registrados e protegidos; GET /health de produção retornou 200. Nenhum teste iniciou workers operacionais de produção.</li></ul>
+
+<h2>12. Build, lint e typecheck</h2>
+<p>Ruff nos novos módulos Python, testes e script: aprovado. <code>compileall backend/app</code>: aprovado. <code>node --check frontend/threat-intelligence.js</code>: aprovado. <code>git diff --check</code>: aprovado. Compose com o override de estatísticas: configuração válida.</p>
+<p>Build completo com <code>backend/Dockerfile</code> aprovado, imagem candidata isolada. Smoke da imagem: 448 rotas, OpenAPI gerado e K-S funcional. Frontend é JavaScript estático: não possui build TypeScript nem typecheck configurado. Não foi introduzido um framework novo. Permanecem avisos preexistentes de depreciação FastAPI/Pydantic e IDs OpenAPI duplicados em endpoints antigos.</p>
+<p>SciPy foi avaliado como dependência binária apropriada para Python 3.12, evitando implementação estatística própria. Importação é tardia, apenas quando K-S/Benford têm amostra suficiente; o primeiro uso adiciona latência de inicialização. Referência: <a href="https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.ks_2samp.html">documentação oficial de ks_2samp</a>.</p>
+
+<h2>13. Limitações encontradas</h2>
+<p>País ausente; duração sem observações válidas; retenção bruta de quatro dias; baseline inicial parcial. Não há garantia de independência estatística dos flows, e os p-values não devem ser interpretados como probabilidades de ataque. Diferentes políticas de sampling dos exporters podem influenciar comparações globais; o modo por pacotes usa os contadores armazenados. Preferir scopes consistentes por sensor/interface para comparar períodos.</p>
+<p>Não houve teste de carga de sete dias, nem comprovação de custo para todos os scopes de 1h; essas consultas estão protegidas pelos limites citados. O histórico cresce por escopo consultado/coletado. API sob demanda e worker opcional compartilham o arquivo analítico quando configurados pelo override.</p>
+
+<h2>14. Itens conscientemente não implementados</h2>
+<p>Payload entropy; ações automáticas; mudanças de detecção, mitigação, BGP, PBR, scripts operacionais ou Wanguard; score arbitrário; criação de um segundo attack event. CLIENT e ATTACK_EVENT ficaram reservados para evolução e não são aceitos silenciosamente pela API. Sem enriquecimento GeoIP externo por registro. Sem backfill automático de toda a retenção; apenas pequenas janelas reais foram reconstruídas no banco de validação.</p>
+
+<h2>15. Interface final e exemplos reais</h2>
+<p>Painel expansível “ANÁLISE ESTATÍSTICA” dentro de Threat Intelligence: filtros, Shannon com distribuição/anomalia separadas, gráfico 0..1 com campo selecionável, K-S destacando D e cards Benford com tabela de dígitos ou motivo de não aplicabilidade. Dados faltantes aparecem como travessão, nunca como baixa entropia. Alta diversidade não recebe vermelho automaticamente.</p>
+<p><a href="traffic-statistics-evidence/statistics-desktop.png">Captura desktop</a> · <a href="traffic-statistics-evidence/statistics-mobile.png">Captura celular</a>. Capturas do componente isolado com estilos reais e respostas reais da API de desenvolvimento; não representam uma implantação em produção.</p>
+<details><summary>Ver captura desktop</summary><img src="traffic-statistics-evidence/statistics-desktop.png" alt="Painel de análise estatística com Shannon, histórico, K-S e Benford"></details>
+<p>Respostas completas: <a href="traffic-statistics-evidence/api-target-baseline.json">IP alvo com baseline parcial</a>, <a href="traffic-statistics-evidence/api-interface.json">interface</a>, <a href="traffic-statistics-evidence/api-global.json">global</a>, <a href="traffic-statistics-evidence/history-target-final.json">histórico temporal</a>.</p>
+<pre>// Extraído da resposta real do IP alvo, 06/10/2026 19:29–19:34 BRT
+{
+  "field": "src_ip",
+  "entropy_normalized": 0.6524295557155677,
+  "baseline_median": 0.657349670028604,
+  "baseline_mad": 0.013240870259318804,
+  "robust_z": -0.2506309309522866,
+  "distribution_classification": "MIXED",
+  "anomaly_classification": "NORMAL"
+}
+// K-S bytes/registro: D=0.0472486315; p=0.1547102908;
+// 624 amostras atuais / 6.141 históricas; NORMAL.
+// Benford no mesmo alvo: applicable=false, INSUFFICIENT_SAMPLES.
+// Benford global: 10.000 amostras, 4.4036 ordens,
+// MAD=0.0492608394; STRONG_DIVERGENCE — não é veredito de ataque.</pre>
+
+<h2>16. Ativação e risco restante</h2>
+<p>A feature está pronta para revisão e ativação autorizada. A base de produção permanece em <code>baf3de0</code>; código, imagem candidata e dados de validação estão separados. A alteração no backend principal é exclusivamente o registro do router. Não há importações do módulo analítico para serviços de mitigação/detecção, nem chamadas a eles.</p>
+<p>Para habilitar a coleta contínua, definir scopes reais em <code>GMJFLOW_STATISTICS_SCOPES</code> e usar o override <code>docker-compose.statistics.yml</code>. O serviço opcional tem uma CPU, 512 MiB e somente o volume de estatísticas. Até lá, o histórico é produzido por consultas da API. A criação das tabelas analíticas ocorre no primeiro uso, sem tocar ClickHouse.</p>
+<p><strong>Deploy e reinício não foram executados.</strong> O item 15 do anexo determina: “Não faça deploy de produção ou restart de serviços sem autorização explícita.” A autorização pendente é para publicar os arquivos/imagem e reiniciar somente o backend necessário; serviços de detecção/mitigação não precisam ser reiniciados para esta entrega. A escolha dos scopes do coletor deve respeitar o volume observado.</p>
+</main></body></html>

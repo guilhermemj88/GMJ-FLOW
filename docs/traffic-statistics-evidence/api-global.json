@@ -1,0 +1,442 @@
+{
+  "window": {
+    "name": "5m",
+    "from": "2026-10-06T22:32:00+00:00",
+    "to": "2026-10-06T22:37:00+00:00",
+    "end_epoch": 1791326220
+  },
+  "scope": {
+    "type": "global",
+    "id": "",
+    "sensor": "",
+    "exporter": "",
+    "direction": "both"
+  },
+  "weight_mode": "PACKET_WEIGHTED",
+  "entropy": [
+    {
+      "field": "src_ip",
+      "weight_mode": "PACKET_WEIGHTED",
+      "samples": 3658333.0,
+      "cardinality": 105037,
+      "entropy_bits": 12.420432324484716,
+      "entropy_normalized": 0.7446062145419385,
+      "hmax": 16.680538091030343,
+      "distribution_classification": "MIXED",
+      "baseline_samples": 0,
+      "baseline_median": null,
+      "baseline_mad": null,
+      "delta": null,
+      "robust_z": null,
+      "regularized_z": null,
+      "anomaly_classification": "NO_BASELINE"
+    },
+    {
+      "field": "dst_ip",
+      "weight_mode": "PACKET_WEIGHTED",
+      "samples": 3658333.0,
+      "cardinality": 100868,
+      "entropy_bits": 13.48744581060083,
+      "entropy_normalized": 0.811416035401916,
+      "hmax": 16.62210903179913,
+      "distribution_classification": "HIGH_DIVERSITY",
+      "baseline_samples": 0,
+      "baseline_median": null,
+      "baseline_mad": null,
+      "delta": null,
+      "robust_z": null,
+      "regularized_z": null,
+      "anomaly_classification": "NO_BASELINE"
+    },
+    {
+      "field": "src_port",
+      "weight_mode": "PACKET_WEIGHTED",
+      "samples": 3658333.0,
+      "cardinality": 63396,
+      "entropy_bits": 6.9853641797317305,
+      "entropy_normalized": 0.437896097857826,
+      "hmax": 15.95210419527352,
+      "distribution_classification": "MIXED",
+      "baseline_samples": 0,
+      "baseline_median": null,
+      "baseline_mad": null,
+      "delta": null,
+      "robust_z": null,
+      "regularized_z": null,
+      "anomaly_classification": "NO_BASELINE"
+    },
+    {
+      "field": "dst_port",
+      "weight_mode": "PACKET_WEIGHTED",
+      "samples": 3658333.0,
+      "cardinality": 64225,
+      "entropy_bits": 12.964915134507564,
+      "entropy_normalized": 0.8117863027846272,
+      "hmax": 15.970847364675542,
+      "distribution_classification": "HIGH_DIVERSITY",
+      "baseline_samples": 0,
+      "baseline_median": null,
+      "baseline_mad": null,
+      "delta": null,
+      "robust_z": null,
+      "regularized_z": null,
+      "anomaly_classification": "NO_BASELINE"
+    },
+    {
+      "field": "protocol",
+      "weight_mode": "PACKET_WEIGHTED",
+      "samples": 3658333.0,
+      "cardinality": 6,
+      "entropy_bits": 1.0191947321288453,
+      "entropy_normalized": 0.39427834324270045,
+      "hmax": 2.584962500721156,
+      "distribution_classification": "MIXED",
+      "baseline_samples": 0,
+      "baseline_median": null,
+      "baseline_mad": null,
+      "delta": null,
+      "robust_z": null,
+      "regularized_z": null,
+      "anomaly_classification": "NO_BASELINE"
+    },
+    {
+      "field": "tcp_flags",
+      "weight_mode": "PACKET_WEIGHTED",
+      "samples": 3658333.0,
+      "cardinality": 13,
+      "entropy_bits": 1.369129152162472,
+      "entropy_normalized": 0.36999093525302745,
+      "hmax": 3.700439718141092,
+      "distribution_classification": "MIXED",
+      "baseline_samples": 0,
+      "baseline_median": null,
+      "baseline_mad": null,
+      "delta": null,
+      "robust_z": null,
+      "regularized_z": null,
+      "anomaly_classification": "NO_BASELINE"
+    },
+    {
+      "field": "src_asn",
+      "weight_mode": "PACKET_WEIGHTED",
+      "samples": 2802783.0,
+      "cardinality": 5444,
+      "entropy_bits": 5.733817247694246,
+      "entropy_normalized": 0.46201520680385066,
+      "hmax": 12.410451351503994,
+      "distribution_classification": "MIXED",
+      "baseline_samples": 0,
+      "baseline_median": null,
+      "baseline_mad": null,
+      "delta": null,
+      "robust_z": null,
+      "regularized_z": null,
+      "anomaly_classification": "NO_BASELINE"
+    },
+    {
+      "field": "input_interface",
+      "weight_mode": "PACKET_WEIGHTED",
+      "samples": 3658224.0,
+      "cardinality": 71,
+      "entropy_bits": 4.202013037053778,
+      "entropy_normalized": 0.6832822480987185,
+      "hmax": 6.149747119504682,
+      "distribution_classification": "MIXED",
+      "baseline_samples": 0,
+      "baseline_median": null,
+      "baseline_mad": null,
+      "delta": null,
+      "robust_z": null,
+      "regularized_z": null,
+      "anomaly_classification": "NO_BASELINE"
+    },
+    {
+      "field": "output_interface",
+      "weight_mode": "PACKET_WEIGHTED",
+      "samples": 3425745.0,
+      "cardinality": 70,
+      "entropy_bits": 3.9968885493396407,
+      "entropy_normalized": 0.6520972417638204,
+      "hmax": 6.129283016944966,
+      "distribution_classification": "MIXED",
+      "baseline_samples": 0,
+      "baseline_median": null,
+      "baseline_mad": null,
+      "delta": null,
+      "robust_z": null,
+      "regularized_z": null,
+      "anomaly_classification": "NO_BASELINE"
+    }
+  ],
+  "ks": [
+    {
+      "metric": "bytes_per_flow",
+      "statistic": null,
+      "p_value": null,
+      "current_samples": 10000,
+      "baseline_samples": 0,
+      "classification": "INSUFFICIENT_SAMPLES",
+      "p_value_note": "Approximate; discrete values, ties and flow dependence limit calibration."
+    },
+    {
+      "metric": "packets_per_flow",
+      "statistic": null,
+      "p_value": null,
+      "current_samples": 10000,
+      "baseline_samples": 0,
+      "classification": "INSUFFICIENT_SAMPLES",
+      "p_value_note": "Approximate; discrete values, ties and flow dependence limit calibration."
+    },
+    {
+      "metric": "avg_packet_size",
+      "statistic": null,
+      "p_value": null,
+      "current_samples": 10000,
+      "baseline_samples": 0,
+      "classification": "INSUFFICIENT_SAMPLES",
+      "p_value_note": "Approximate; discrete values, ties and flow dependence limit calibration."
+    },
+    {
+      "metric": "flow_duration",
+      "statistic": null,
+      "p_value": null,
+      "current_samples": 0,
+      "baseline_samples": 0,
+      "classification": "INSUFFICIENT_SAMPLES",
+      "p_value_note": "Approximate; discrete values, ties and flow dependence limit calibration."
+    },
+    {
+      "metric": "bps_per_flow",
+      "statistic": null,
+      "p_value": null,
+      "current_samples": 0,
+      "baseline_samples": 0,
+      "classification": "INSUFFICIENT_SAMPLES",
+      "p_value_note": "Approximate; discrete values, ties and flow dependence limit calibration."
+    },
+    {
+      "metric": "pps_per_flow",
+      "statistic": null,
+      "p_value": null,
+      "current_samples": 0,
+      "baseline_samples": 0,
+      "classification": "INSUFFICIENT_SAMPLES",
+      "p_value_note": "Approximate; discrete values, ties and flow dependence limit calibration."
+    }
+  ],
+  "benford": [
+    {
+      "metric": "bytes_per_flow",
+      "applicable": true,
+      "reason": null,
+      "sample_count": 10000,
+      "excluded_count": 0,
+      "orders_of_magnitude": 4.403565459325402,
+      "magnitude_range": [
+        60.0,
+        1519556.0
+      ],
+      "observed": [
+        0.4178,
+        0.1458,
+        0.0511,
+        0.038,
+        0.0337,
+        0.0958,
+        0.1192,
+        0.038,
+        0.0606
+      ],
+      "expected": [
+        0.3010299956639812,
+        0.17609125905568124,
+        0.12493873660829992,
+        0.09691001300805642,
+        0.07918124604762482,
+        0.06694678963061322,
+        0.05799194697768673,
+        0.05115252244738129,
+        0.04575749056067514
+      ],
+      "chi_square": 2413.1345296390136,
+      "p_value": 0.0,
+      "mad": 0.049260839370454154,
+      "classification": "STRONG_DIVERGENCE"
+    },
+    {
+      "metric": "packets_per_flow",
+      "applicable": true,
+      "reason": null,
+      "sample_count": 10000,
+      "excluded_count": 0,
+      "orders_of_magnitude": 3.0064660422492318,
+      "magnitude_range": [
+        1.0,
+        1015.0
+      ],
+      "observed": [
+        0.6681,
+        0.154,
+        0.0687,
+        0.0383,
+        0.0245,
+        0.0171,
+        0.0108,
+        0.0088,
+        0.0097
+      ],
+      "expected": [
+        0.3010299956639812,
+        0.17609125905568124,
+        0.12493873660829992,
+        0.09691001300805642,
+        0.07918124604762482,
+        0.06694678963061322,
+        0.05799194697768673,
+        0.05115252244738129,
+        0.04575749056067514
+      ],
+      "chi_square": 6878.907042247037,
+      "p_value": 0.0,
+      "mad": 0.08157111207467085,
+      "classification": "STRONG_DIVERGENCE"
+    },
+    {
+      "metric": "flow_duration",
+      "applicable": false,
+      "reason": "INSUFFICIENT_SAMPLES",
+      "sample_count": 0,
+      "excluded_count": 10000,
+      "orders_of_magnitude": null,
+      "magnitude_range": null,
+      "observed": null,
+      "expected": [
+        0.3010299956639812,
+        0.17609125905568124,
+        0.12493873660829992,
+        0.09691001300805642,
+        0.07918124604762482,
+        0.06694678963061322,
+        0.05799194697768673,
+        0.05115252244738129,
+        0.04575749056067514
+      ],
+      "chi_square": null,
+      "p_value": null,
+      "mad": null,
+      "classification": null
+    },
+    {
+      "metric": "bps_per_flow",
+      "applicable": false,
+      "reason": "INSUFFICIENT_SAMPLES",
+      "sample_count": 0,
+      "excluded_count": 10000,
+      "orders_of_magnitude": null,
+      "magnitude_range": null,
+      "observed": null,
+      "expected": [
+        0.3010299956639812,
+        0.17609125905568124,
+        0.12493873660829992,
+        0.09691001300805642,
+        0.07918124604762482,
+        0.06694678963061322,
+        0.05799194697768673,
+        0.05115252244738129,
+        0.04575749056067514
+      ],
+      "chi_square": null,
+      "p_value": null,
+      "mad": null,
+      "classification": null
+    },
+    {
+      "metric": "pps_per_flow",
+      "applicable": false,
+      "reason": "INSUFFICIENT_SAMPLES",
+      "sample_count": 0,
+      "excluded_count": 10000,
+      "orders_of_magnitude": null,
+      "magnitude_range": null,
+      "observed": null,
+      "expected": [
+        0.3010299956639812,
+        0.17609125905568124,
+        0.12493873660829992,
+        0.09691001300805642,
+        0.07918124604762482,
+        0.06694678963061322,
+        0.05799194697768673,
+        0.05115252244738129,
+        0.04575749056067514
+      ],
+      "chi_square": null,
+      "p_value": null,
+      "mad": null,
+      "classification": null
+    }
+  ],
+  "overall": {
+    "statisticalAnomaly": "HIGH",
+    "partial_evidence": true,
+    "rule": "maximum_classification; no score; no automatic action"
+  },
+  "baseline": {
+    "days_requested": 7,
+    "coverage_days": 0,
+    "windows": 0,
+    "status": "WARMING_UP",
+    "from": null,
+    "to": null
+  },
+  "sampling": {
+    "method": "deterministic_hash_top_k; historical_nonoverlapping_window_reservoir",
+    "flow_records": 1123407,
+    "current_samples": 10000,
+    "baseline_samples": 0,
+    "historical_per_window_limit": 512,
+    "historical_weighting": "equal time-window strata; not traffic-volume weighted"
+  },
+  "unavailable_fields": [
+    "src_country"
+  ],
+  "query_ms": {
+    "schema": 3.44,
+    "entropy_src_ip": 113.27,
+    "entropy_dst_ip": 113.33,
+    "entropy_src_port": 67.27,
+    "entropy_dst_port": 71.59,
+    "entropy_protocol": 58.14,
+    "entropy_tcp_flags": 51.76,
+    "entropy_src_asn": 55.74,
+    "entropy_input_interface": 65.61,
+    "entropy_output_interface": 63.96,
+    "count": 32.83,
+    "sample": 331.88
+  },
+  "config": {
+    "concentrated": 0.25,
+    "diverse": 0.75,
+    "z_moderate": 3.0,
+    "z_strong": 6.0,
+    "mad_scale_floor": 0.01,
+    "baseline_min_windows": 12,
+    "ks_min_samples": 30,
+    "ks_thresholds": [
+      0.1,
+      0.2,
+      0.35
+    ],
+    "benford_min_samples": 1000,
+    "benford_min_orders": 2.0,
+    "benford_mad_thresholds": [
+      0.012,
+      0.018
+    ],
+    "current_sample_limit": 10000,
+    "baseline_sample_limit": 20000,
+    "baseline_days": 7
+  },
+  "read_only": true
+}

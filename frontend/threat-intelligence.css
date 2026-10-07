@@ -762,3 +762,7 @@ details.ux-collapsible[open] > summary.ux-section-title::before {
 .flow-secondary {
   font-size: .78rem;
 }
+
+.statistics-benford-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr)); gap: 1rem; align-items: start; }
+#statisticsForm label { font-size: .8rem; }
+#trafficStatisticsPanel summary { cursor: pointer; }

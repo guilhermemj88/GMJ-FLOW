@@ -1940,3 +1940,101 @@ function renderTransportSemanticBadge(investigation) {
     return `<span class="d-inline-flex flex-wrap gap-1 mt-1">${sourceBadge(item?.decision_source)}${intelChips(item?.intel_sources)}</span>${details ? `<span class="subtle d-block mt-1">${esc(details)}</span>` : ''}${structuredIntel}`;
   };
 }(typeof globalThis !== 'undefined' ? globalThis : window));
+
+// Traffic statistics: independent read-only UI; existing authenticated apiRequest.
+(function (root) {
+  'use strict';
+  const labels = {
+    src_ip: 'IP origem', dst_ip: 'IP destino', src_port: 'Porta origem', dst_port: 'Porta destino',
+    protocol: 'Protocolo', tcp_flags: 'Flags TCP', src_asn: 'ASN origem', src_country: 'País origem',
+    input_interface: 'Interface entrada', output_interface: 'Interface saída',
+    bytes_per_flow: 'Bytes / registro', packets_per_flow: 'Pacotes / registro', avg_packet_size: 'Bytes / pacote',
+    flow_duration: 'Duração (s)', bps_per_flow: 'Bits/s por registro', pps_per_flow: 'Pacotes/s por registro',
+    CONCENTRATED: 'Concentrada', MIXED: 'Mista', HIGH_DIVERSITY: 'Alta diversidade',
+    NO_DATA: 'Sem dados', NO_BASELINE: 'Baseline em formação', NORMAL: 'Normal', MODERATE: 'Moderada',
+    STRONG: 'Forte', HIGH: 'Alta', INSUFFICIENT_DATA: 'Dados insuficientes', INSUFFICIENT_SAMPLES: 'Amostras insuficientes',
+    INSUFFICIENT_MAGNITUDE_RANGE: 'Amplitude insuficiente', SMALL_SHIFT: 'Pequena mudança',
+    RELEVANT_SHIFT: 'Mudança relevante', STRONG_SHIFT: 'Forte mudança', NORMAL_CONFORMITY: 'Conformidade normal',
+    MODERATE_DIVERGENCE: 'Divergência moderada', STRONG_DIVERGENCE: 'Divergência forte'
+  };
+  const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const fmt = (value, digits = 3) => value === null || value === undefined ? '—' : Number(value).toLocaleString('pt-BR', {maximumFractionDigits:digits});
+  const label = value => labels[value] || value || '—';
+  const pvalue = value => value !== null && value !== undefined && value < .0001 ? '<0,0001' : fmt(value, 4);
+  const el = id => document.getElementById(id);
+  let chart, query, busy = false, revision = 0;
+  function render(data) {
+    el('statisticsResults').hidden = false;
+    el('statisticsOverall').textContent = `Anomalia estatística: ${label(data.overall.statisticalAnomaly)}${data.overall.partial_evidence ? ' · Evidência parcial' : ''}`;
+    el('statisticsBaseline').textContent = `Baseline: ${data.baseline.windows} janelas independentes / últimos 7 dias · Cobertura ${fmt(100 * (data.baseline.coverage_ratio ?? 0), 1)}% (${data.baseline.valid_windows ?? 0}/${data.baseline.expected_windows ?? 0})${data.baseline.status === 'WARMING_UP' ? ' · Em formação' : data.baseline.status === 'PARTIAL' ? ' · Cobertura parcial' : ''}.`;
+    el('statisticsEntropy').innerHTML = data.entropy.map(x => `<tr><td>${esc(label(x.field))}</td><td>${fmt(x.entropy_normalized)}</td><td>${fmt(x.baseline_median)}</td><td>${fmt(x.delta)}</td><td title="MAD zero: z indefinido; classificação usa escala mínima documentada de 0,01.">${fmt(x.robust_z)}</td><td>${esc(label(x.distribution_classification))}</td><td>${esc(label(x.anomaly_classification))}</td></tr>`).join('');
+    const selected = el('statisticsField').value;
+    el('statisticsField').innerHTML = data.entropy.map(x => `<option value="${esc(x.field)}">${esc(label(x.field))}</option>`).join('');
+    if (data.entropy.some(x => x.field === selected)) el('statisticsField').value = selected;
+    el('statisticsKs').innerHTML = data.ks.map(x => `<tr><td>${esc(label(x.metric))}</td><td><strong>${fmt(x.statistic)}</strong></td><td>${esc(pvalue(x.p_value))}</td><td>${fmt(x.current_samples,0)} / ${fmt(x.baseline_samples,0)}</td><td>${esc(label(x.classification))}</td></tr>`).join('');
+    el('statisticsBenford').innerHTML = data.benford.map(x => `<section class="metric-card"><h4 class="panel-title">${esc(label(x.metric))}</h4><p>Amostras: ${fmt(x.sample_count,0)} · Ordens: ${fmt(x.orders_of_magnitude,1)}</p>${x.applicable ? `<p>χ² ${fmt(x.chi_square,2)} · p ${esc(pvalue(x.p_value))} · MAD ${fmt(x.mad,4)}</p><p>${esc(label(x.classification))}</p><table class="table table-sm"><caption class="subtle">Primeiro dígito: observado × esperado</caption><thead><tr><th>Dígito</th><th>Observado</th><th>Esperado</th></tr></thead><tbody>${x.observed.map((v,i) => `<tr><td>${i+1}</td><td>${fmt(v*100,1)}%</td><td>${fmt(x.expected[i]*100,1)}%</td></tr>`).join('')}</tbody></table>` : `<p>Benford não aplicável a esta amostra</p><p class="subtle">${esc(label(x.reason))}</p>`}</section>`).join('');
+  }
+  async function loadHistory(version = revision) {
+    if (!query) return;
+    const params = new URLSearchParams(query);
+    const field = el('statisticsField').value;
+    params.set('field', field);
+    try {
+      const data = await apiRequest(`/api/threat-intelligence/statistics/history?${params}`);
+      if (version !== revision || field !== el('statisticsField').value) return;
+      el('statisticsHistoryStatus').textContent = data.items.length ? `${data.items.length} observações. Lacunas representam períodos sem coleta.` : 'Histórico ainda não disponível para este campo e escopo.';
+      if (!root.echarts) { el('statisticsHistoryStatus').textContent += ' Gráfico indisponível.'; return; }
+      chart = chart || root.echarts.init(el('statisticsChart'));
+      // Explicit nulls prevent visually bridging long collection gaps.
+      const points = [];
+      data.items.forEach((x,i) => {
+        const t = Date.parse(x.timestamp);
+        if (i && t-Date.parse(data.items[i-1].timestamp)>90000) points.push([t-60000,null,null]);
+        points.push([t,x.entropy_normalized,x.baseline_median]);
+      });
+      chart.setOption({tooltip:{trigger:'axis'},legend:{data:['Atual','Baseline']},grid:{left:40,right:15,bottom:35},
+        xAxis:{type:'time'},yAxis:{type:'value',min:0,max:1},
+        series:[{name:'Atual',type:'line',connectNulls:false,showSymbol:true,symbolSize:4,data:points.map(x=>[x[0],x[1]])},
+          {name:'Baseline',type:'line',connectNulls:false,showSymbol:true,symbolSize:4,lineStyle:{type:'dashed'},data:points.map(x=>[x[0],x[2]])}]},true);
+    } catch (error) { if (version===revision) el('statisticsHistoryStatus').textContent = `Histórico indisponível: ${error.message}`; }
+  }
+  async function refresh() {
+    if (!query || busy) return;
+    const version = revision;
+    busy = true;
+    el('statisticsStatus').textContent = 'Calculando estatísticas…';
+    try {
+      const data = await apiRequest(`/api/threat-intelligence/statistics/summary?${query}`);
+      if (version !== revision) return;
+      render(data);
+      el('statisticsStatus').textContent = `${new Date(data.window.from).toLocaleString('pt-BR')} — ${new Date(data.window.to).toLocaleString('pt-BR')} · ${fmt(data.sampling.flow_records,0)} registros · Campos ausentes: ${data.unavailable_fields.map(label).join(', ') || 'nenhum'}.`;
+      await loadHistory(version);
+    } catch (error) {
+      if (version === revision) { el('statisticsResults').hidden = true; el('statisticsStatus').textContent = `Análise indisponível: ${error.message}`; }
+    } finally { busy = false; if (version !== revision) refresh(); }
+  }
+  function init() {
+    if (!el('statisticsForm')) return;
+    el('statisticsScope').addEventListener('change', () => {
+      const global = el('statisticsScope').value === 'global';
+      const iface = el('statisticsScope').value === 'interface';
+      el('statisticsId').disabled = global; el('statisticsId').required = !global;
+      el('statisticsSensor').required = iface; el('statisticsExporter').required = iface;
+    });
+    el('statisticsForm').addEventListener('submit', event => {
+      event.preventDefault(); revision++;
+      query = new URLSearchParams({scopeType:el('statisticsScope').value,scopeId:el('statisticsScope').value === 'global' ? '' : el('statisticsId').value.trim(),
+        sensor:el('statisticsSensor').value.trim(),exporter:el('statisticsExporter').value.trim(),direction:el('statisticsDirection').value,window:el('statisticsWindow').value});
+      el('statisticsResults').hidden = true;
+      refresh();
+    });
+    el('statisticsField').addEventListener('change', () => loadHistory());
+    root.addEventListener('resize', () => chart?.resize());
+    el('trafficStatisticsPanel').addEventListener('toggle', () => chart?.resize());
+    root.setInterval(() => {
+      if (!document.hidden && el('trafficStatisticsPanel').open && el('view-threat-intelligence').classList.contains('active')) refresh();
+    },60000);
+  }
+  root.GMJTrafficStatistics = {format:fmt, escape:esc, label, render};
+  if (typeof document !== 'undefined') document.addEventListener('DOMContentLoaded',init);
+}(typeof globalThis !== 'undefined' ? globalThis : window));
