@@ -2091,12 +2091,28 @@ class MediaDestinationTestModesTest(MediaBase):
         self._seed_occurrence(9001, first_seen="2026-10-07T06:00:00Z", last_seen="2026-10-07T06:05:00Z")
         self._seed_occurrence(event_id, first_seen="2026-10-07T09:56:40Z", last_seen="2026-10-07T09:56:40Z")
         media_id = self._insert_destination()
+        mitigation_tables = ("mitigation_executions", "automatic_mitigation_jobs", "bgp_announcements")
+
+        def table_count(conn, table):
+            try:
+                return int(conn.execute(f"SELECT COUNT(*) AS n FROM {table}").fetchone()["n"])
+            except sqlite3.Error:
+                return None
+
         with backend_main.sqlite_connection() as conn:
             before_event = dict(conn.execute("SELECT * FROM anomaly_events WHERE id = ?", (event_id,)).fetchone())
             before_occurrences = int(conn.execute("SELECT COUNT(*) AS n FROM anomaly_occurrences").fetchone()["n"])
             before_logs = int(conn.execute("SELECT COUNT(*) AS n FROM media_delivery_logs").fetchone()["n"])
+            before_mitigation = {table: table_count(conn, table) for table in mitigation_tables}
         body = backend_main.MediaDestinationTestPayload(source="existing", anomaly_id=event_id, anomaly_table="anomaly_events")
-        result, envelope = self._call_test_endpoint(media_id, body)
+        with mock.patch.object(
+            media_dispatch,
+            "post_json",
+            return_value={"ok": True, "http_status": 200, "duration_ms": 7, "error": ""},
+        ) as post:
+            result = backend_main.test_media(media_id, request=None, payload=body)
+        self.assertEqual(post.call_count, 1, "o destino escolhido deve receber exatamente um POST")
+        envelope = post.call_args[0][1]
         self.assertTrue(result["ok"])
         self.assertEqual(result["source"], "existing")
         self.assertEqual(result["anomaly"]["id"], event_id)
@@ -2117,12 +2133,14 @@ class MediaDestinationTestModesTest(MediaBase):
             after_event = dict(conn.execute("SELECT * FROM anomaly_events WHERE id = ?", (event_id,)).fetchone())
             after_occurrences = int(conn.execute("SELECT COUNT(*) AS n FROM anomaly_occurrences").fetchone()["n"])
             after_logs = int(conn.execute("SELECT COUNT(*) AS n FROM media_delivery_logs").fetchone()["n"])
+            after_mitigation = {table: table_count(conn, table) for table in mitigation_tables}
             destination = conn.execute(
                 "SELECT last_test_status, last_test_http_status FROM media_integrations WHERE id = ?", (media_id,)
             ).fetchone()
         self.assertEqual(before_event, after_event)
         self.assertEqual(before_occurrences, after_occurrences)
         self.assertEqual(before_logs, after_logs)
+        self.assertEqual(before_mitigation, after_mitigation)
         self.assertEqual(destination["last_test_status"], "success")
         self.assertEqual(int(destination["last_test_http_status"]), 200)
 
@@ -2194,6 +2212,61 @@ class MediaDestinationTestModesTest(MediaBase):
         self.assertTrue(result["ok"])
         self.assertEqual(envelope["data"]["cgnat"]["private_ip"], "100.64.9.50")
         self.assertEqual(envelope["data"]["cgnat"]["device_name"], "A10-FIBINET")
+
+    def test_preview_mode_builds_payload_without_sending_or_writing(self):
+        self._seed_cgnat_mapping()
+        event_id = self._insert_anomaly_event()
+        self._seed_occurrence(event_id, first_seen="2026-10-07T09:56:40Z", last_seen="2026-10-07T09:56:40Z")
+        media_id = self._insert_destination()
+        with backend_main.sqlite_connection() as conn:
+            before_dest = dict(conn.execute(
+                "SELECT last_test_at, last_test_status, last_test_http_status FROM media_integrations WHERE id = ?",
+                (media_id,),
+            ).fetchone())
+            before_occurrences = int(conn.execute("SELECT COUNT(*) AS n FROM anomaly_occurrences").fetchone()["n"])
+        body = backend_main.MediaDestinationTestPayload(
+            source="existing", anomaly_id=event_id, anomaly_table="anomaly_events", preview=True
+        )
+        with mock.patch.object(
+            media_dispatch,
+            "post_json",
+            return_value={"ok": True, "http_status": 200, "duration_ms": 1, "error": ""},
+        ) as post:
+            result = backend_main.test_media(media_id, request=None, payload=body)
+        post.assert_not_called()
+        self.assertTrue(result["preview"])
+        self.assertEqual(result["source"], "existing")
+        self.assertEqual(result["anomaly"]["id"], event_id)
+        data = result["payload"]["data"]
+        self.assertEqual(data["event_id"], event_id)
+        self.assertEqual(data["correlation"]["subject_key"], "100.64.9.50")
+        self.assertEqual(data["cgnat"]["private_ip"], "100.64.9.50")
+        with backend_main.sqlite_connection() as conn:
+            after_dest = dict(conn.execute(
+                "SELECT last_test_at, last_test_status, last_test_http_status FROM media_integrations WHERE id = ?",
+                (media_id,),
+            ).fetchone())
+            after_occurrences = int(conn.execute("SELECT COUNT(*) AS n FROM anomaly_occurrences").fetchone()["n"])
+        self.assertEqual(before_dest, after_dest)
+        self.assertEqual(before_occurrences, after_occurrences)
+
+    def test_preview_matches_sent_payload_for_standard_mode(self):
+        self._seed_cgnat_mapping()
+        media_id = self._insert_destination()
+        with mock.patch.object(
+            media_dispatch,
+            "post_json",
+            return_value={"ok": True, "http_status": 200, "duration_ms": 1, "error": ""},
+        ) as post:
+            sent = backend_main.test_media(media_id, request=None, payload=backend_main.MediaDestinationTestPayload(source="standard"))
+        self.assertTrue(sent["ok"])
+        sent_envelope = post.call_args[0][1]
+        preview = backend_main.test_media(
+            media_id, request=None, payload=backend_main.MediaDestinationTestPayload(source="standard", preview=True)
+        )
+        self.assertTrue(preview["preview"])
+        self.assertEqual(preview["payload"]["data"], sent_envelope["data"])
+        self.assertEqual(preview["payload"]["event"], sent_envelope["event"])
 
     def test_existing_mode_keeps_test_flag_and_destination_template(self):
         self._seed_cgnat_mapping()

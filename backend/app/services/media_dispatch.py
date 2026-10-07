@@ -1492,6 +1492,7 @@ def test_media_integration(
     *,
     sample_data: dict[str, Any] | None = None,
     payload_data: dict[str, Any] | None = None,
+    dry_run: bool = False,
 ) -> dict[str, Any]:
     """Envia um payload de exemplo para um destino. Sincrono, para a tela de teste.
 
@@ -1508,7 +1509,9 @@ def test_media_integration(
         core). Nada e recalculado aqui.
 
     Devolve o resultado do POST acrescido do envelope efetivamente enviado em
-    `payload`. Nunca grava anomalia, ocorrencia ou mitigacao.
+    `payload`. Nunca grava anomalia, ocorrencia ou mitigacao. Com dry_run=True
+    (preview do modal), monta o MESMO envelope sem executar o POST e devolve
+    {"dry_run": True, "payload": envelope}.
     """
     item = dict(integration)
     try:
@@ -1557,6 +1560,9 @@ def test_media_integration(
         )
     envelope = inject_cgnat_block(envelope, cgnat_block)
     envelope = inject_correlation_block(envelope, sample.get("correlation"))
+    if dry_run:
+        # Preview do modal: MESMO envelope do envio, sem POST e sem efeitos.
+        return {"dry_run": True, "payload": envelope}
     result = post_json(url, envelope, integration_headers(item), normalize_timeout(item.get("timeout_seconds")))
     result["payload"] = envelope
     return result

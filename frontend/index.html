@@ -9269,12 +9269,11 @@ Webhook e integração de mídia funcionando.</textarea></div>
               <div class="d-flex flex-column gap-2">
                 <div id="mediaTestDestinationHint" class="subtle">—</div>
                 <div class="field">
-                  <label>Fonte do evento</label>
-                  <label class="form-check"><input type="radio" class="form-check-input" name="mediaTestSource" value="standard" checked><span class="form-check-label">Gerar evento padrão (completo — inclui CGNAT e reincidência de demonstração)</span></label>
-                  <label class="form-check"><input type="radio" class="form-check-input" name="mediaTestSource" value="existing"><span class="form-check-label">Usar anomalia existente (payload real, mesmo pipeline do envio)</span></label>
+                  <label>Evento</label>
+                  <label class="form-check"><input type="radio" class="form-check-input" name="mediaTestSource" value="existing" checked><span class="form-check-label">Anomalia existente (payload real, mesmo pipeline do envio)</span></label>
+                  <label class="form-check"><input type="radio" class="form-check-input" name="mediaTestSource" value="standard"><span class="form-check-label">Evento padrão (completo — inclui CGNAT e reincidência de demonstração)</span></label>
                 </div>
-                <div id="mediaTestStandardPane" class="subtle">Evento sintético no formato real de uma anomalia de DNS outbound, com os mesmos enriquecimentos do envio (template do destino, CGNAT e correlation). Não grava anomalia e não aciona mitigação.</div>
-                <div id="mediaTestExistingPane" class="d-none">
+                <div id="mediaTestExistingPane">
                   <div class="toolbar" style="gap:6px;">
                     <input id="mediaTestAnomalySearch" class="form-control form-control-sm" placeholder="Buscar por IP, vector ou zona" style="max-width:300px;">
                     <button id="mediaTestAnomalySearchButton" type="button" class="btn btn-sm btn-outline-secondary">Buscar</button>
@@ -9282,15 +9281,20 @@ Webhook e integração de mídia funcionando.</textarea></div>
                   <div id="mediaTestAnomalyStatus" class="subtle mt-1"></div>
                   <div id="mediaTestAnomalyList" style="max-height:260px; overflow:auto; margin-top:6px; display:flex; flex-direction:column; gap:6px;"></div>
                 </div>
+                <div id="mediaTestStandardPane" class="d-none subtle">Evento sintético no formato real de uma anomalia de DNS outbound, com os mesmos enriquecimentos do envio (template do destino, CGNAT e correlation). Não grava anomalia e não aciona mitigação.</div>
+                <div class="field">
+                  <label>Preview do evento/payload</label>
+                  <div id="mediaTestDestinationPreviewSummary" class="subtle">—</div>
+                  <details id="mediaTestDestinationPreviewJsonBox">
+                    <summary class="subtle">JSON do payload</summary>
+                    <pre id="mediaTestDestinationPreviewJson" class="subtle mt-1" style="max-height:240px; overflow:auto; font-size:11px; padding:8px; border:1px solid var(--border); border-radius:6px; margin-bottom:0;">—</pre>
+                  </details>
+                </div>
                 <div id="mediaTestDestinationStatus" class="subtle"></div>
                 <div class="toolbar">
+                  <button type="button" class="btn btn-sm btn-outline-secondary" data-close-modal="mediaTestDestinationModal">Cancelar</button>
                   <button id="mediaTestDestinationSendButton" type="button" class="btn btn-sm btn-success"><i data-lucide="send"></i><span>Enviar teste</span></button>
-                  <button type="button" class="btn btn-sm btn-outline-secondary" data-close-modal="mediaTestDestinationModal">Fechar</button>
                 </div>
-                <details id="mediaTestDestinationPayloadBox" class="d-none">
-                  <summary class="subtle">Payload enviado</summary>
-                  <pre id="mediaTestDestinationPayload" class="subtle mt-1" style="max-height:280px; overflow:auto; font-size:11px; padding:8px; border:1px solid var(--border); border-radius:6px; margin-bottom:0;">—</pre>
-                </details>
               </div>
             </div>
           </div>
@@ -32466,7 +32470,15 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
 
     function mediaTestDestinationSource() {
       const checked = document.querySelector('input[name="mediaTestSource"]:checked');
-      return checked ? checked.value : 'standard';
+      return checked ? checked.value : 'existing';
+    }
+
+    function mediaTestSelectedAnomaly() {
+      const selected = document.querySelector('input[name="mediaTestAnomaly"]:checked');
+      if (!selected) return null;
+      const parts = String(selected.value || '').split(':');
+      if (parts.length !== 2) return null;
+      return { table: parts[0], id: Number(parts[1]) };
     }
 
     function mediaTestDestinationApplyMode() {
@@ -32474,7 +32486,10 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       document.getElementById('mediaTestStandardPane').classList.toggle('d-none', mode !== 'standard');
       document.getElementById('mediaTestExistingPane').classList.toggle('d-none', mode !== 'existing');
       if (mode === 'existing') {
+        setText('mediaTestDestinationPreviewSummary', 'Selecione uma anomalia para carregar o preview.');
         loadMediaTestAnomalies().catch(error => setText('mediaTestAnomalyStatus', `Falha: ${error.message}`));
+      } else {
+        loadMediaTestDestinationPreview().catch(error => setText('mediaTestDestinationStatus', `Falha no preview: ${error.message}`));
       }
     }
 
@@ -32484,18 +32499,17 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       mediaTestDestinationId = Number(id);
       setText('mediaTestDestinationTitle', `Testar destino — ${info.name || `#${id}`}`);
       setText('mediaTestDestinationHint', 'O envio é apenas um teste: nada é gravado como anomalia, nenhuma ocorrência é criada e nenhuma mitigação é acionada.');
-      document.querySelectorAll('input[name="mediaTestSource"]').forEach(input => { input.checked = input.value === 'standard'; });
+      document.querySelectorAll('input[name="mediaTestSource"]').forEach(input => { input.checked = input.value === 'existing'; });
       document.getElementById('mediaTestAnomalySearch').value = '';
       document.getElementById('mediaTestAnomalyList').innerHTML = '';
-      setText('mediaTestAnomalyStatus', '');
+      setText('mediaTestAnomalyStatus', 'Carregando anomalias recentes…');
       setText('mediaTestDestinationStatus', '');
-      const payloadBox = document.getElementById('mediaTestDestinationPayloadBox');
-      payloadBox.classList.add('d-none');
-      payloadBox.open = false;
-      document.getElementById('mediaTestDestinationPayload').textContent = '—';
-      document.getElementById('mediaTestStandardPane').classList.remove('d-none');
-      document.getElementById('mediaTestExistingPane').classList.add('d-none');
+      setText('mediaTestDestinationPreviewSummary', 'Selecione uma anomalia para carregar o preview.');
+      document.getElementById('mediaTestDestinationPreviewJson').textContent = '—';
+      document.getElementById('mediaTestStandardPane').classList.add('d-none');
+      document.getElementById('mediaTestExistingPane').classList.remove('d-none');
       openModal('mediaTestDestinationModal');
+      mediaTestDestinationApplyMode();
     }
 
     function mediaTestAnomalyRecurrenceText(correlation) {
@@ -32508,6 +32522,81 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         return `Reincidência: ${number}ª ocorrência hoje${previous}`;
       }
       return 'Primeira ocorrência do dia';
+    }
+
+    function mediaTestFormatNumber(value) {
+      const number = Number(value);
+      if (!Number.isFinite(number) || !number) return '—';
+      return number.toLocaleString('pt-BR', { maximumFractionDigits: 2 });
+    }
+
+    function mediaTestFormatBps(value) {
+      const number = Number(value);
+      if (!Number.isFinite(number) || !number) return '—';
+      if (number >= 1e9) return `${(number / 1e9).toFixed(2)} Gbps`;
+      if (number >= 1e6) return `${(number / 1e6).toFixed(2)} Mbps`;
+      if (number >= 1e3) return `${(number / 1e3).toFixed(2)} kbps`;
+      return `${number.toFixed(0)} bps`;
+    }
+
+    function renderMediaTestDestinationPreview(payload, anomalyRef) {
+      const summary = document.getElementById('mediaTestDestinationPreviewSummary');
+      const json = document.getElementById('mediaTestDestinationPreviewJson');
+      const section = payload && typeof payload === 'object' && payload.data && typeof payload.data === 'object' ? payload.data : null;
+      if (!section) {
+        summary.textContent = 'Template do destino não usa a seção padrão "data" — veja o JSON abaixo.';
+        json.textContent = JSON.stringify(payload || {}, null, 2);
+        return;
+      }
+      const correlation = section.correlation && typeof section.correlation === 'object' ? section.correlation : null;
+      const cgnat = section.cgnat && typeof section.cgnat === 'object' ? section.cgnat : null;
+      const vector = section.display_name || section.vector_name || '—';
+      const severity = String(section.severity || '—').toUpperCase();
+      const target = section.target_ip ? `${section.target_ip}${section.target_port ? `:${section.target_port}` : ''}` : '—';
+      const anomalyInfo = anomalyRef ? ` <span class="subtle">· anomalia #${Number(anomalyRef.id)} (${escapeHtml(anomalyRef.table || '')})</span>` : '';
+      const lines = [
+        `<div><strong>${escapeHtml(vector)}</strong> <span class="subtle">(${escapeHtml(section.vector_name || '—')})</span>${anomalyInfo}</div>`,
+        `<div><span class="subtle">severidade</span> <strong>${escapeHtml(severity)}</strong> · <span class="subtle">status</span> ${escapeHtml(section.status || '—')} · <span class="subtle">direção</span> ${escapeHtml(section.direction || '—')} · <span class="subtle">protocolo</span> ${escapeHtml(section.protocol || '—')}</div>`,
+        `<div><span class="subtle">alvo</span> ${escapeHtml(target)} · <span class="subtle">pps</span> ${mediaTestFormatNumber(section.pps)} · <span class="subtle">bps</span> ${mediaTestFormatBps(section.bps)} · <span class="subtle">início</span> ${escapeHtml(formatDateTime(section.started_at))}</div>`,
+        cgnat && cgnat.resolved
+          ? `<div><span class="subtle">CGNAT</span> ${escapeHtml(cgnat.private_ip || '—')} ← ${escapeHtml(cgnat.public_ip || '—')}:${escapeHtml(cgnat.public_port ?? '—')} · ${escapeHtml(cgnat.device_name || '—')} / ${escapeHtml(cgnat.pool_name || '—')} · conf ${escapeHtml(cgnat.confidence ?? '—')}</div>`
+          : '<div><span class="subtle">CGNAT</span> sem resolução para este evento</div>',
+        correlation
+          ? (correlation.is_recurrence
+              ? `<div><span class="subtle">Reincidência:</span> <strong>${escapeHtml(correlation.occurrence_number_today ?? '—')}ª ocorrência hoje</strong> · última ${escapeHtml(formatDateTime(correlation.last_previous_occurrence_at))}</div>`
+              : '<div><span class="subtle">Primeira ocorrência do dia (sem reincidência)</span></div>')
+          : '<div><span class="subtle">Sem bloco de correlation neste evento</span></div>',
+      ];
+      summary.innerHTML = lines.join('');
+      json.textContent = JSON.stringify(payload, null, 2);
+    }
+
+    async function loadMediaTestDestinationPreview() {
+      if (!mediaTestDestinationId) return;
+      const mode = mediaTestDestinationSource();
+      const body = { source: mode, preview: true };
+      if (mode === 'existing') {
+        const selected = mediaTestSelectedAnomaly();
+        if (!selected) {
+          setText('mediaTestDestinationPreviewSummary', 'Selecione uma anomalia para carregar o preview.');
+          document.getElementById('mediaTestDestinationPreviewJson').textContent = '—';
+          return;
+        }
+        body.anomaly_table = selected.table;
+        body.anomaly_id = selected.id;
+      }
+      setText('mediaTestDestinationPreviewSummary', 'Montando preview…');
+      try {
+        const result = await apiRequest(`/api/media/${mediaTestDestinationId}/test`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        renderMediaTestDestinationPreview(result?.payload, result?.anomaly || null);
+      } catch (error) {
+        setText('mediaTestDestinationPreviewSummary', `Falha no preview: ${error.message}`);
+        document.getElementById('mediaTestDestinationPreviewJson').textContent = '—';
+      }
     }
 
     function renderMediaTestAnomalies(items) {
@@ -32558,14 +32647,13 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
       const mode = mediaTestDestinationSource();
       const body = { source: mode };
       if (mode === 'existing') {
-        const selected = document.querySelector('input[name="mediaTestAnomaly"]:checked');
+        const selected = mediaTestSelectedAnomaly();
         if (!selected) {
-          setText('mediaTestDestinationStatus', 'Selecione uma anomalia da lista (ou use "Gerar evento padrão").');
+          setText('mediaTestDestinationStatus', 'Selecione uma anomalia da lista (ou use "Evento padrão").');
           return;
         }
-        const [table, anomalyId] = selected.value.split(':');
-        body.anomaly_table = table;
-        body.anomaly_id = Number(anomalyId);
+        body.anomaly_table = selected.table;
+        body.anomaly_id = selected.id;
       }
       setText('mediaTestDestinationStatus', 'Enviando teste…');
       try {
@@ -32580,14 +32668,8 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
           ? ` · anomalia #${result.anomaly.id} (${result.anomaly.vector_name || '—'})`
           : '';
         setText('mediaTestDestinationStatus', `${label} · ${http} · ${result?.duration_ms ?? 0} ms${result?.error ? ` · ${result.error}` : ''}${anomalyInfo}`);
-        const box = document.getElementById('mediaTestDestinationPayloadBox');
-        const pre = document.getElementById('mediaTestDestinationPayload');
         if (result?.payload) {
-          pre.textContent = JSON.stringify(result.payload, null, 2);
-          box.classList.remove('d-none');
-          box.open = true;
-        } else {
-          box.classList.add('d-none');
+          renderMediaTestDestinationPreview(result.payload, result.anomaly || null);
         }
       } catch (error) {
         setText('mediaTestDestinationStatus', `Falha no teste: ${error.message}`);
@@ -32870,6 +32952,12 @@ ${escapeHtml(item.withdraw_command || '-')}</pre></details>`;
         if (event.key === 'Enter') {
           event.preventDefault();
           loadMediaTestAnomalies().catch(error => setText('mediaTestAnomalyStatus', `Falha: ${error.message}`));
+        }
+      });
+      document.getElementById('mediaTestAnomalyList')?.addEventListener('change', event => {
+        const target = event.target;
+        if (target && target.name === 'mediaTestAnomaly') {
+          loadMediaTestDestinationPreview().catch(error => setText('mediaTestDestinationStatus', `Falha no preview: ${error.message}`));
         }
       });
       document.getElementById('mediaTestDestinationSendButton')?.addEventListener('click', () => sendMediaTestDestination().catch(error => setText('mediaTestDestinationStatus', `Falha: ${error.message}`)));

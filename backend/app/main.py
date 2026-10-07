@@ -29067,6 +29067,7 @@ class MediaDestinationTestPayload(BaseModel):
     source: str = "standard"
     anomaly_id: int | None = None
     anomaly_table: str | None = None
+    preview: bool = False
 
 
 @app.post("/api/media/test-event")
@@ -29500,13 +29501,15 @@ def test_media(media_id: int, request: Request, payload: MediaDestinationTestPay
         security_anomalies) carregada pelo MESMO caminho do envio real
         (load_anomaly_payload).
     Somente o last_test_* do proprio destino e atualizado; nenhuma anomalia,
-    ocorrencia ou mitigacao e criada/alterada.
+    ocorrencia ou mitigacao e criada/alterada. Com preview=True o MESMO
+    envelope e montado e devolvido sem POST e sem atualizar last_test_*.
     """
     require_permission(request, "settings.manage")
     ensure_sensor_db()
     source = clean_text(getattr(payload, "source", "") or "standard").lower()
     if source not in {"standard", "existing"}:
         raise HTTPException(status_code=400, detail="source invalido (use standard ou existing)")
+    preview = bool(getattr(payload, "preview", False))
     anomaly_ref: dict[str, Any] | None = None
     with sqlite_connection() as conn:
         row = conn.execute("SELECT * FROM media_integrations WHERE id = ?", (media_id,)).fetchone()
@@ -29525,7 +29528,7 @@ def test_media(media_id: int, request: Request, payload: MediaDestinationTestPay
             data, _anomaly_row = media_dispatch.load_anomaly_payload(conn, anomaly_table, anomaly_id)
             if data is None:
                 raise HTTPException(status_code=404, detail="Anomalia nao encontrada")
-            result = media_dispatch.test_media_integration(row, payload_data=data)
+            result = media_dispatch.test_media_integration(row, payload_data=data, dry_run=preview)
             correlation = data.get("correlation") if isinstance(data.get("correlation"), dict) else {}
             anomaly_ref = {
                 "table": anomaly_table,
@@ -29538,7 +29541,22 @@ def test_media(media_id: int, request: Request, payload: MediaDestinationTestPay
                 "occurrence_number_today": correlation.get("occurrence_number_today"),
             }
         else:
-            result = media_dispatch.test_media_integration(row)
+            result = media_dispatch.test_media_integration(row, dry_run=preview)
+        if preview:
+            # Preview do modal: mesmo pipeline, sem POST e sem gravar last_test_*.
+            preview_response: dict[str, Any] = {
+                "id": media_id,
+                "source": source,
+                "preview": True,
+                "ok": False,
+                "http_status": 0,
+                "duration_ms": 0,
+                "error": "",
+                "payload": result.get("payload"),
+            }
+            if anomaly_ref is not None:
+                preview_response["anomaly"] = anomaly_ref
+            return preview_response
         conn.execute(
             """
             UPDATE media_integrations
