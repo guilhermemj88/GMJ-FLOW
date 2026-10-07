@@ -1,0 +1,9 @@
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+ARG FEATURE_REVISION
+LABEL org.opencontainers.image.revision=${FEATURE_REVISION}
+# Preserve every installed production dependency. Only these two tested wheels
+# are added; dependency resolution must not upgrade unrelated packages.
+RUN pip install --no-cache-dir --no-deps numpy==2.4.6 scipy==1.15.3
+COPY backend/app /app/app
+COPY backend/requirements.txt /app/requirements.txt
