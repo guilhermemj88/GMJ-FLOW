@@ -1966,7 +1966,7 @@ function renderTransportSemanticBadge(investigation) {
   function render(data) {
     el('statisticsResults').hidden = false;
     el('statisticsOverall').textContent = `Anomalia estatística: ${label(data.overall.statisticalAnomaly)}${data.overall.partial_evidence ? ' · Evidência parcial' : ''}`;
-    el('statisticsBaseline').textContent = `Baseline: ${data.baseline.windows} janelas independentes disponíveis / últimos 7 dias${data.baseline.status === 'WARMING_UP' ? ' · Em formação' : data.baseline.status === 'PARTIAL' ? ' · Cobertura parcial' : ''}.`;
+    el('statisticsBaseline').textContent = `Baseline: ${data.baseline.windows} janelas independentes / últimos 7 dias · Cobertura ${fmt(100 * (data.baseline.coverage_ratio ?? 0), 1)}% (${data.baseline.valid_windows ?? 0}/${data.baseline.expected_windows ?? 0})${data.baseline.status === 'WARMING_UP' ? ' · Em formação' : data.baseline.status === 'PARTIAL' ? ' · Cobertura parcial' : ''}.`;
     el('statisticsEntropy').innerHTML = data.entropy.map(x => `<tr><td>${esc(label(x.field))}</td><td>${fmt(x.entropy_normalized)}</td><td>${fmt(x.baseline_median)}</td><td>${fmt(x.delta)}</td><td title="MAD zero: z indefinido; classificação usa escala mínima documentada de 0,01.">${fmt(x.robust_z)}</td><td>${esc(label(x.distribution_classification))}</td><td>${esc(label(x.anomaly_classification))}</td></tr>`).join('');
     const selected = el('statisticsField').value;
     el('statisticsField').innerHTML = data.entropy.map(x => `<option value="${esc(x.field)}">${esc(label(x.field))}</option>`).join('');

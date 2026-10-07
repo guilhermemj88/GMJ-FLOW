@@ -14,6 +14,8 @@ class StatisticsConfig:
     # Explicit regularization for a constant baseline, in normalized entropy units.
     mad_scale_floor: float = 0.01
     baseline_min_windows: int = 12
+    baseline_ready_coverage: float = 0.90
+    baseline_ready_span_days: float = 6.9
     ks_min_samples: int = 30
     ks_thresholds: tuple = (0.10, 0.20, 0.35)
     benford_min_samples: int = 1000
@@ -25,6 +27,44 @@ class StatisticsConfig:
 
 
 CONFIG = StatisticsConfig()
+
+
+def baseline_coverage(history, end, seconds, config=CONFIG):
+    """Density of valid independent windows, including gaps in the denominator."""
+    lower = end - config.baseline_days * 86400 + seconds
+    upper = end - seconds
+    first_slot = (lower + seconds - 1) // seconds
+    last_slot = upper // seconds
+    expected = max(0, last_slot - first_slot + 1)
+    valid_ends = sorted(
+        {
+            item["window"]["end_epoch"]
+            for item in history
+            if lower <= item["window"]["end_epoch"] <= upper
+            and item["window"]["end_epoch"] % seconds == 0
+            and any(
+                value["entropy_normalized"] is not None for value in item["entropy"]
+            )
+        }
+    )
+    ratio = len(valid_ends) / expected if expected else 0.0
+    span = (end - valid_ends[0]) / 86400 if valid_ends else 0.0
+    status = "WARMING_UP"
+    if len(valid_ends) >= config.baseline_min_windows:
+        status = (
+            "READY"
+            if ratio >= config.baseline_ready_coverage
+            and span >= config.baseline_ready_span_days
+            else "PARTIAL"
+        )
+    return dict(
+        status=status,
+        expected_windows=expected,
+        valid_windows=len(valid_ends),
+        coverage_ratio=round(ratio, 6),
+        coverage_days=round(span, 4),
+        ready_min_coverage=config.baseline_ready_coverage,
+    )
 
 
 def entropy_from_aggregates(samples, cardinality, weighted_log, config=CONFIG):
@@ -112,6 +152,8 @@ def ks_test(current, historical, config=CONFIG):
         classification="INSUFFICIENT_SAMPLES",
         p_value_note="Approximate; discrete values, ties and flow dependence limit calibration.",
     )
+    if not a:
+        return dict(result, classification="NO_DATA")
     if min(len(a), len(b)) < config.ks_min_samples:
         return result
     from scipy.stats import ks_2samp

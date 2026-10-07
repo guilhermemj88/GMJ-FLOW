@@ -21,6 +21,7 @@ from app.services.sqlite_managed import open_managed
 from app.services.traffic_statistics_math import (
     CONFIG,
     baseline,
+    baseline_coverage,
     benford_test,
     entropy_from_aggregates,
     ks_test,
@@ -373,9 +374,7 @@ class StatisticsService:
             def iso(t):
                 return datetime.fromtimestamp(t, timezone.utc).isoformat()
 
-            coverage_days = (
-                (end - history[0]["window"]["end_epoch"]) / 86400 if history else 0
-            )
+            coverage = baseline_coverage(history, end, seconds)
             evidence_complete = all(
                 x["anomaly_classification"] not in {"NO_DATA", "NO_BASELINE"}
                 for x in entropy
@@ -399,19 +398,15 @@ class StatisticsService:
                 },
                 baseline={
                     "days_requested": 7,
-                    "coverage_days": round(coverage_days, 4),
+                    **coverage,
                     "windows": len(history),
-                    "status": "WARMING_UP"
-                    if len(history) < CONFIG.baseline_min_windows
-                    else "PARTIAL"
-                    if coverage_days < 6.9
-                    else "READY",
                     "from": history[0]["window"]["from"] if history else None,
                     "to": history[-1]["window"]["to"] if history else None,
                 },
                 sampling={
                     "method": "deterministic_hash_top_k; historical_nonoverlapping_window_reservoir",
                     "flow_records": count,
+                    "flow_weighted_definition": "COUNT of stored flow_raw records; not SUM(flow_count)",
                     "current_samples": len(samples),
                     "baseline_samples": len(historical),
                     "historical_per_window_limit": 512,

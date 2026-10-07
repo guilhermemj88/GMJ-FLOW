@@ -22,6 +22,7 @@ from app.services.traffic_statistics import (
 from app.services.traffic_statistics_math import (
     CONFIG,
     baseline,
+    baseline_coverage,
     benford_test,
     entropy_counts,
     ks_test,
@@ -30,6 +31,63 @@ from app.services.traffic_statistics_math import (
 
 
 class MathematicsTests(unittest.TestCase):
+    def test_duration_without_current_observations_is_no_data(self):
+        result = ks_test([None, None], list(range(100)))
+        self.assertEqual(result["classification"], "NO_DATA")
+        self.assertIsNone(result["statistic"])
+        self.assertIsNone(result["p_value"])
+
+    def test_baseline_sparse_week_is_partial(self):
+        end = 1800000000
+        history = [
+            dict(
+                window={"end_epoch": end - 600000 + i * 300},
+                entropy=[{"entropy_normalized": 0.5}],
+            )
+            for i in range(12)
+        ]
+        result = baseline_coverage(history, end, 300)
+        self.assertGreater(result["coverage_days"], 6.9)
+        self.assertEqual(result["status"], "PARTIAL")
+        self.assertLess(result["coverage_ratio"], 0.01)
+
+    def test_baseline_dense_week_ready_and_missing_windows_partial(self):
+        end = 1800000000
+        history = [
+            dict(window={"end_epoch": t}, entropy=[{"entropy_normalized": 0.5}])
+            for t in range(end - 7 * 86400 + 300, end, 300)
+        ]
+        ready = baseline_coverage(history, end, 300)
+        self.assertEqual(ready["status"], "READY")
+        self.assertEqual(ready["coverage_ratio"], 1)
+        self.assertEqual(ready["expected_windows"], 2015)
+        sparse = baseline_coverage(history[::2], end, 300)
+        self.assertEqual(sparse["status"], "PARTIAL")
+
+    def test_baseline_empty_windows_do_not_establish_readiness(self):
+        end = 1800000000
+        history = [
+            dict(window={"end_epoch": t}, entropy=[{"entropy_normalized": None}])
+            for t in range(end - 7 * 86400 + 300, end, 300)
+        ]
+        result = baseline_coverage(history, end, 300)
+        self.assertEqual(result["status"], "WARMING_UP")
+        self.assertEqual(result["valid_windows"], 0)
+
+    def test_baseline_coverage_boundary_is_ninety_percent(self):
+        end = 1800000000
+        history = [
+            dict(window={"end_epoch": t}, entropy=[{"entropy_normalized": 0.5}])
+            for t in range(end - 7 * 86400 + 300, end, 300)
+        ]
+        minimum = math.ceil(len(history) * 0.90)
+        self.assertEqual(
+            baseline_coverage(history[:minimum], end, 300)["status"], "READY"
+        )
+        self.assertEqual(
+            baseline_coverage(history[: minimum - 1], end, 300)["status"], "PARTIAL"
+        )
+
     def test_single(self):
         result = entropy_counts({"x": 12})
         self.assertEqual((result["entropy_bits"], result["entropy_normalized"]), (0, 0))

@@ -44,6 +44,7 @@ class KSResult(BaseModel):
     current_samples: int
     baseline_samples: int
     classification: Literal[
+        "NO_DATA",
         "INSUFFICIENT_SAMPLES",
         "NORMAL",
         "SMALL_SHIFT",
