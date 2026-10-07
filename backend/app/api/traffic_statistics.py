@@ -4,7 +4,10 @@ from typing import Any, Literal
 import logging
 import time
 
-from fastapi import APIRouter, HTTPException, Query
+try:
+    from fastapi import APIRouter, HTTPException, Query
+except ImportError:  # Same compatibility as the existing Threat Intelligence router.
+    from fastapi import FastAPI as APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from app.services.traffic_statistics import Scope, get_service, window_seconds
