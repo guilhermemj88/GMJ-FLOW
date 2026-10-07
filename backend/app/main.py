@@ -29149,7 +29149,8 @@ def media_test_event_preview(payload: MediaTestEventPayload, request: Request):
 
     Usa o template do destino informado em `destination_id`; sem destino, usa o
     template padrao. Sempre com test=true (mesmo caminho do envio real),
-    incluindo o MESMO enriquecimento CGNAT (o preview nunca envia webhook).
+    incluindo o MESMO enriquecimento CGNAT e a propagacao da correlation
+    canonica quando presente (o preview nunca envia webhook).
     """
     require_permission(request, "settings.manage")
     ensure_sensor_db()
@@ -29180,6 +29181,7 @@ def media_test_event_preview(payload: MediaTestEventPayload, request: Request):
             template, merged, event_type="anomaly_detected", is_test=True
         )
         rendered = media_dispatch.inject_cgnat_block(rendered, cgnat_block)
+        rendered = media_dispatch.inject_correlation_block(rendered, merged.get("correlation"))
     except media_dispatch.MediaTemplateError as exc:
         raise HTTPException(status_code=400, detail=f"Payload invalido: {exc}") from exc
     return {

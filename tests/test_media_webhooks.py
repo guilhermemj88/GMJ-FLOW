@@ -3,6 +3,7 @@ import json
 import os
 import sqlite3
 import tempfile
+import threading
 import types
 import unittest
 import urllib.error
@@ -1564,6 +1565,341 @@ class MediaCgnatPayloadTest(MediaBase):
             self.assertIn(name, media_dispatch.MEDIA_PLACEHOLDERS)
         rendered = media_dispatch.validate_payload_template('{"x": "{{cgnat_private_ip}}", "c": {{cgnat_confidence}}}')
         self.assertEqual(json.loads(rendered), {"x": "", "c": None})
+
+
+class MediaCorrelationPayloadTest(MediaBase):
+    """Correlation canonica: apenas propagada do core para o webhook (A-H)."""
+
+    SOURCE = (ROOT / "backend" / "app" / "services" / "media_dispatch.py").read_text(encoding="utf-8")
+
+    CORRELATION = {
+        "subject_type": "cgnat_private_ip",
+        "subject_key": "100.64.9.50",
+        "subject_confidence": "high",
+        "subject_context": {"public_ip": "179.189.80.242", "public_port": 20486},
+        "is_recurrence": True,
+        "occurrence_number_today": 4,
+        "occurrences_today": 4,
+        "previous_occurrences_today": 3,
+        "last_previous_occurrence_at": "2026-10-06T12:05:00Z",
+        "previous_occurrences": [
+            {
+                "occurrence_id": 3,
+                "anomaly_id": 4681,
+                "anomaly_table": "anomaly_events",
+                "first_seen": "2026-10-06T12:05:00Z",
+                "last_seen": "2026-10-06T12:10:00Z",
+                "ended_at": "2026-10-06T12:10:00Z",
+                "severity": "warning",
+                "metric": "packets_s",
+                "metric_value": 420000.0,
+            }
+        ],
+        "previous_occurrences_truncated": True,
+        "operational_day": "2026-10-06",
+        "timezone": "America/Sao_Paulo",
+        "schema_version": 1,
+    }
+
+    def _insert_destination(self, **overrides):
+        values = {
+            "name": overrides.pop("name", "webhook correlacao"),
+            "type": "webhook",
+            "url": overrides.pop("url", "http://10.0.0.5:5678/webhook"),
+            "active": 1,
+            "all_sensors": 1,
+            "payload_template": overrides.pop("payload_template", None),
+            "event_types": json.dumps(["anomaly_detected"]),
+            "minimum_severity": "info",
+            "timeout_seconds": 5,
+            "secret_encrypted": "",
+            "secret_header": "X-GMJ-Flow-Token",
+            "created_at": "2026-10-06T00:00:00Z",
+            "updated_at": "2026-10-06T00:00:00Z",
+        }
+        values.update(overrides)
+        with backend_main.sqlite_connection() as conn:
+            cursor = backend_main.sqlite_insert_dict(conn, "media_integrations", values)
+            conn.commit()
+            return int(cursor.lastrowid)
+
+    def _capture_worker_delivery(self, action):
+        """Executa `action` e captura o envelope entregue pelo worker real."""
+        captured = {}
+        done = threading.Event()
+
+        def fake_post(url, envelope, headers, timeout):
+            captured["url"] = url
+            captured["envelope"] = envelope
+            done.set()
+            return {"ok": True, "http_status": 200, "duration_ms": 1, "error": ""}
+
+        with mock.patch.object(media_dispatch, "post_json", side_effect=fake_post):
+            action()
+            arrived = done.wait(timeout=10.0)
+        self.assertTrue(arrived, "worker nao consumiu o job do dispatch")
+        return captured
+
+    def _insert_anomaly_event(self, **overrides):
+        values = {
+            "direction": "transmits",
+            "decoder": "netflow",
+            "severity": "warning",
+            "metric_unit": "packets_s",
+            "threshold_value": 1000.0,
+            "observed_value": 5000.0,
+            "peak_value": 6000.0,
+            "started_at": "2026-10-06T12:00:00Z",
+            "last_seen_at": "2026-10-06T12:05:00Z",
+            "created_at": "2026-10-06T12:00:00Z",
+            "updated_at": "2026-10-06T12:05:00Z",
+            "status": "active",
+            "vector_name": "DNS_SINGLE_FLOW_OUTBOUND",
+            "target_ip": "179.189.80.242",
+            "target_cidr": "179.189.80.242/32",
+            "target_port": 53,
+            "target_role": "src_ip",
+            "protocol": "udp",
+            "top_src_ip": "179.189.80.242",
+            "top_src_port": 20486,
+            "top_dst_ip": "54.233.253.229",
+            "top_dst_port": 53,
+            "dedupe_key": "corr-test",
+        }
+        values.update(overrides)
+        with backend_main.sqlite_connection() as conn:
+            cursor = backend_main.sqlite_insert_dict(conn, "anomaly_events", values)
+            conn.commit()
+            return int(cursor.lastrowid)
+
+    def _seed_cgnat(self):
+        with backend_main.sqlite_connection() as conn:
+            backend_main.ensure_cgnat_schema(conn)
+            now = "2026-10-06T12:00:00Z"
+            cursor = conn.execute(
+                """
+                INSERT INTO cgnat_import_batches
+                    (filename, original_filename, file_hash, status, created_at, activated_at, approved_at, total_rows, valid_rows)
+                VALUES (?, ?, ?, 'active', ?, ?, ?, 3, 3)
+                """,
+                ("a10-cgnat.txt", "a10-cgnat.txt", "cgnat-test-hash", now, now, now),
+            )
+            batch_id = int(cursor.lastrowid)
+            for private_ip, port_start, port_end in (
+                ("100.64.9.18", 17152, 19167),
+                ("100.64.9.50", 19168, 21183),
+                ("100.64.9.82", 21184, 23199),
+            ):
+                conn.execute(
+                    """
+                    INSERT INTO cgnat_port_mappings
+                        (batch_id, source_type, source_filename, device_name, pool_name, public_ip, private_ip,
+                         protocol, port_start, port_end, active, confidence, created_at, updated_at)
+                    VALUES (?, 'a10', 'a10-cgnat.txt', 'A10-FIBINET', 'PUBLIC-POOL-01', ?, ?, 'udp', ?, ?, 1, 1.0, ?, ?)
+                    """,
+                    (batch_id, "179.189.80.242", private_ip, port_start, port_end, now, now),
+                )
+            conn.commit()
+
+    def _insert_occurrence(self, anomaly_id, *, first_seen, last_seen):
+        with backend_main.sqlite_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO anomaly_occurrences
+                    (anomaly_table, anomaly_id, vector_key, dedupe_key, subject_type, subject_key,
+                     subject_confidence, subject_context_json, operational_day, first_seen, last_seen,
+                     ended_at, severity, metric, metric_peak, created_at, updated_at)
+                VALUES ('anomaly_events', ?, 'DNS_SINGLE_FLOW_OUTBOUND', '', 'cgnat_private_ip', '100.64.9.50',
+                        'high', '{}', '2026-10-06', ?, ?, NULL, 'warning', 'packets_s', 5000.0, ?, ?)
+                """,
+                (int(anomaly_id), first_seen, last_seen, "2026-10-06T12:00:00Z", "2026-10-06T12:00:00Z"),
+            )
+            conn.commit()
+
+    def test_a_without_correlation_keeps_legacy_payload(self):
+        """Core nao devolve correlation: payload legado byte-compativel."""
+        event_id = self._insert_anomaly_event()
+        self._insert_destination()
+        def run():
+            with backend_main.sqlite_connection() as conn:
+                media_dispatch.dispatch_anomaly_detected(conn, [event_id])
+
+        with mock.patch.object(
+            backend_main.anomaly_correlation, "resolve_anomaly_correlation", return_value=None
+        ) as resolver:
+            captured = self._capture_worker_delivery(run)
+        self.assertEqual(resolver.call_count, 1)
+        envelope = captured["envelope"]
+        self.assertEqual(sorted(envelope.keys()), ["data", "event", "sent_at", "version"])
+        data = envelope["data"]
+        self.assertNotIn("correlation", data)
+        self.assertNotIn("cgnat", data)
+        with backend_main.sqlite_connection() as conn:
+            row = conn.execute("SELECT * FROM anomaly_events WHERE id = ?", (event_id,)).fetchone()
+            expected = media_dispatch.anomaly_event_data(media_dispatch.with_sensor_fields(conn, row))
+        self.assertEqual(data, expected)
+
+    def test_b_core_correlation_is_propagated_without_recompute(self):
+        """Ocorrencias persistidas pelo core (sem mock): so leitura/propagacao."""
+        with backend_main.sqlite_connection() as conn:
+            backend_main.anomaly_correlation.ensure_anomaly_correlation_schema(conn)
+        event_id = self._insert_anomaly_event()
+        self._insert_destination()
+        self._insert_occurrence(9001, first_seen="2026-10-06T11:00:00Z", last_seen="2026-10-06T11:10:00Z")
+        self._insert_occurrence(event_id, first_seen="2026-10-06T12:00:00Z", last_seen="2026-10-06T12:05:00Z")
+        def run():
+            with backend_main.sqlite_connection() as conn:
+                media_dispatch.dispatch_anomaly_detected(conn, [event_id])
+
+        captured = self._capture_worker_delivery(run)
+        correlation = captured["envelope"]["data"]["correlation"]
+        self.assertEqual(correlation["subject_type"], "cgnat_private_ip")
+        self.assertEqual(correlation["subject_key"], "100.64.9.50")
+        self.assertIs(correlation["is_recurrence"], True)
+        self.assertEqual(correlation["occurrence_number_today"], 2)
+        self.assertEqual(correlation["previous_occurrences_today"], 1)
+        self.assertEqual(correlation["previous_occurrences"][0]["anomaly_id"], 9001)
+        self.assertEqual(correlation["last_previous_occurrence_at"], "2026-10-06T11:00:00Z")
+        self.assertEqual(correlation["operational_day"], "2026-10-06")
+
+    def test_c_not_recurrence_structure(self):
+        event_id = self._insert_anomaly_event()
+        self._insert_destination()
+        correlation = {
+            **self.CORRELATION,
+            "is_recurrence": False,
+            "occurrence_number_today": 1,
+            "occurrences_today": 1,
+            "previous_occurrences_today": 0,
+            "last_previous_occurrence_at": "",
+            "previous_occurrences": [],
+            "previous_occurrences_truncated": False,
+        }
+
+        def run():
+            with backend_main.sqlite_connection() as conn:
+                media_dispatch.dispatch_anomaly_detected(conn, [event_id])
+
+        with mock.patch.object(
+            backend_main.anomaly_correlation, "resolve_anomaly_correlation", return_value=correlation
+        ):
+            captured = self._capture_worker_delivery(run)
+        envelope = captured["envelope"]
+        self.assertEqual(envelope["data"]["correlation"], correlation)
+
+    def test_d_recurrence_with_previous_occurrences_preserved(self):
+        event_id = self._insert_anomaly_event()
+        self._insert_destination()
+        previous = [
+            {**self.CORRELATION["previous_occurrences"][0], "occurrence_id": 10, "anomaly_id": 5001},
+            {
+                **self.CORRELATION["previous_occurrences"][0],
+                "occurrence_id": 11,
+                "anomaly_id": 5002,
+                "first_seen": "2026-10-06T13:05:00Z",
+            },
+        ]
+        correlation = {
+            **self.CORRELATION,
+            "previous_occurrences": previous,
+            "previous_occurrences_today": 2,
+            "occurrence_number_today": 3,
+            "occurrences_today": 3,
+        }
+
+        def run():
+            with backend_main.sqlite_connection() as conn:
+                media_dispatch.dispatch_anomaly_detected(conn, [event_id])
+
+        with mock.patch.object(
+            backend_main.anomaly_correlation, "resolve_anomaly_correlation", return_value=correlation
+        ):
+            captured = self._capture_worker_delivery(run)
+        envelope = captured["envelope"]
+        self.assertEqual(envelope["data"]["correlation"], correlation)
+
+    def test_e_cgnat_and_correlation_together(self):
+        self._seed_cgnat()
+        event_id = self._insert_anomaly_event()
+        self._insert_destination()
+
+        def run():
+            with backend_main.sqlite_connection() as conn:
+                media_dispatch.dispatch_anomaly_detected(conn, [event_id])
+
+        with mock.patch.object(
+            backend_main.anomaly_correlation, "resolve_anomaly_correlation", return_value=self.CORRELATION
+        ):
+            captured = self._capture_worker_delivery(run)
+        data = captured["envelope"]["data"]
+        self.assertEqual(data["cgnat"]["private_ip"], "100.64.9.50")
+        self.assertEqual(data["cgnat"]["public_port"], 20486)
+        self.assertEqual(data["correlation"], self.CORRELATION)
+        self.assertEqual(data["top_src_ip"], "179.189.80.242")
+        self.assertEqual(data["target_port"], 53)
+
+    def test_f_preview_preserves_correlation(self):
+        body = backend_main.MediaTestEventPayload(
+            src_ip="179.189.80.242",
+            src_port=20486,
+            direction="transmits",
+            target_ip="54.233.253.229",
+            target_port=53,
+            protocol="udp",
+            severity="warning",
+        )
+        sample = {
+            "top_src_ip": "179.189.80.242",
+            "top_src_port": 20486,
+            "top_dst_ip": "54.233.253.229",
+            "top_dst_port": 53,
+            "target_ip": "54.233.253.229",
+            "target_port": 53,
+            "direction": "transmits",
+            "protocol": "udp",
+            "correlation": dict(self.CORRELATION),
+        }
+        with mock.patch.object(backend_main, "media_test_event_data", return_value=sample):
+            preview = backend_main.media_test_event_preview(body, request=None)
+        self.assertEqual(preview["data"]["correlation"], self.CORRELATION)
+        self.assertEqual(preview["payload"]["data"]["correlation"], self.CORRELATION)
+
+    def test_g_test_destination_sends_correlation(self):
+        self._seed_cgnat()
+        media_id = self._insert_destination()
+        with mock.patch.object(
+            media_dispatch,
+            "post_json",
+            return_value={"ok": True, "http_status": 200, "duration_ms": 1, "error": ""},
+        ) as post:
+            result = backend_main.test_media(media_id, request=None)
+        self.assertTrue(result["ok"])
+        data = post.call_args[0][1]["data"]
+        self.assertEqual(data["correlation"], media_dispatch.TEST_SAMPLE_CORRELATION)
+        self.assertEqual(data["cgnat"]["private_ip"], "100.64.9.50")
+
+    def test_test_event_send_propagates_correlation_when_present(self):
+        self._insert_destination()
+        with mock.patch.object(
+            media_dispatch,
+            "post_json",
+            return_value={"ok": True, "http_status": 200, "duration_ms": 1, "error": ""},
+        ) as post:
+            media_dispatch.send_test_event({"correlation": dict(self.CORRELATION), "severity": "critical"})
+        envelope = post.call_args[0][1]
+        self.assertEqual(envelope["data"]["correlation"], self.CORRELATION)
+
+    def test_h_never_resolves_again_and_never_touches_occurrences(self):
+        with mock.patch.object(backend_main.anomaly_correlation, "resolve_anomaly_correlation") as resolver:
+            with backend_main.sqlite_connection() as conn:
+                payload = media_dispatch.enrich_payload_with_correlation(
+                    conn, {"correlation": self.CORRELATION}, table="anomaly_events", anomaly_id=1
+                )
+        resolver.assert_not_called()
+        self.assertEqual(payload["correlation"], self.CORRELATION)
+        self.assertNotIn("anomaly_occurrences", self.SOURCE)
+        self.assertNotIn("record_anomaly_occurrence", self.SOURCE)
+        self.assertIn("resolve_anomaly_correlation", self.SOURCE)
 
 
 if __name__ == "__main__":

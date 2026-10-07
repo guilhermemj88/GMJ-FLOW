@@ -24,6 +24,11 @@ O disparo real (anomaly_detected) e as ferramentas administrativas de teste
 (enrich_anomaly_event_with_cgnat). Quando ha match, o payload ganha campos
 aditivos `cgnat_*` e o objeto `data.cgnat`; quando nao ha match, nada e
 alterado (payload legado intacto).
+
+A correlacao canonica de anomalias e apenas PROPAGADA: quando o resolver do
+core (anomaly_correlation) devolve `correlation`, o payload ganha
+`data.correlation` com a estrutura original preservada; nenhum recalculo ou
+consulta propria de ocorrencias acontece nesta camada.
 """
 
 from __future__ import annotations
@@ -246,12 +251,46 @@ TEST_SAMPLE_EVENT = {
     "dedupe_key": "TEST-0000",
 }
 
+# Correlation controlada do sample do botao "Testar destino": existe SOMENTE
+# para exercitar o contrato do webhook (data.correlation), com a MESMA
+# estrutura canonica devolvida pelo core. Nao representa historico real.
+TEST_SAMPLE_CORRELATION: dict[str, Any] = {
+    "subject_type": "cgnat_private_ip",
+    "subject_key": "100.64.9.50",
+    "subject_confidence": "high",
+    "subject_context": {"public_ip": "179.189.80.242", "public_port": 20486},
+    "is_recurrence": True,
+    "occurrence_number_today": 4,
+    "occurrences_today": 4,
+    "previous_occurrences_today": 3,
+    "last_previous_occurrence_at": "2026-10-06T12:05:00Z",
+    "previous_occurrences": [
+        {
+            "occurrence_id": 3,
+            "anomaly_id": 4681,
+            "anomaly_table": "anomaly_events",
+            "first_seen": "2026-10-06T12:05:00Z",
+            "last_seen": "2026-10-06T12:10:00Z",
+            "ended_at": "2026-10-06T12:10:00Z",
+            "severity": "warning",
+            "metric": "packets_s",
+            "metric_value": 420000.0,
+        }
+    ],
+    "previous_occurrences_truncated": True,
+    "operational_day": "2026-10-06",
+    "timezone": "America/Sao_Paulo",
+    "schema_version": 1,
+}
+
 # Sample padrao do botao "Testar destino" (test_media_integration). Usa os
 # mesmos nomes de campo do builder do preview administrativo
 # (media_test_event_data, em main.py) e reproduz o formato logico de uma
 # anomalia real de saida (direction=transmits) com coordenada CGNAT
 # resolvivel: 179.189.80.242:20486 -> 100.64.9.50. O lookup correto e
 # top_src_ip/top_src_port; target_port=53 NAO participa da resolucao.
+# A correlation embutida e o contrato de exemplo (ver TEST_SAMPLE_CORRELATION)
+# e NAO representa historico real.
 TEST_DESTINATION_SAMPLE: dict[str, Any] = {
     **TEST_SAMPLE_EVENT,
     "target_ip": "179.189.80.242",
@@ -268,6 +307,7 @@ TEST_DESTINATION_SAMPLE: dict[str, Any] = {
     "source_engine": "gmjflow",
     "source_id": "test",
     "status": "test",
+    "correlation": TEST_SAMPLE_CORRELATION,
 }
 
 # Endpoints de metadata de cloud que jamais devem ser alvo de um webhook.
@@ -1175,6 +1215,55 @@ def inject_cgnat_block(envelope: Any, cgnat_block: dict[str, Any] | None) -> Any
     return envelope
 
 
+def enrich_payload_with_correlation(
+    conn: sqlite3.Connection,
+    data: dict[str, Any],
+    *,
+    table: str,
+    anomaly_id: int | None,
+    anomaly: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Propaga a correlation canonica do core para o payload de midia.
+
+    Nenhuma logica de correlacao vive aqui: quando o payload ja traz
+    `correlation`, ele e mantido sem nova consulta (nao re-resolve); caso
+    contrario, reutiliza o MESMO resolver das APIs
+    (anomaly_correlation.resolve_anomaly_correlation) e copia o dict devolvido
+    sem alterar a estrutura. Sem resultado, devolve o payload intacto.
+    Nunca levanta excecao.
+    """
+    payload = dict(data or {})
+    if payload.get("correlation") is not None:
+        return payload
+    try:
+        from app.services import anomaly_correlation
+
+        correlation = anomaly_correlation.resolve_anomaly_correlation(
+            conn, table, anomaly_id, anomaly=anomaly if anomaly is not None else payload
+        )
+    except Exception:
+        return payload
+    if isinstance(correlation, dict) and correlation:
+        payload["correlation"] = correlation
+    return payload
+
+
+def inject_correlation_block(envelope: Any, correlation: Any) -> Any:
+    """Acrescenta `data.correlation` ao envelope renderizado, de forma aditiva.
+
+    So age com `correlation` (dict do core) e quando o envelope possui um
+    objeto `data` (template padrao ou template customizado que mantem a
+    secao `data`). Sem correlation, nada e alterado; a estrutura interna do
+    dict nao e modificada nem flattenada.
+    """
+    if not isinstance(correlation, dict) or not correlation or not isinstance(envelope, dict):
+        return envelope
+    section = envelope.get("data")
+    if isinstance(section, dict) and "correlation" not in section:
+        section["correlation"] = correlation
+    return envelope
+
+
 def dispatch_media_event(
     event_type: str,
     data: dict[str, Any],
@@ -1234,6 +1323,7 @@ def dispatch_media_event(
                         DEFAULT_PAYLOAD_TEMPLATE, payload_data, event_type=event_key
                     )
                 envelope = inject_cgnat_block(envelope, cgnat_block)
+                envelope = inject_correlation_block(envelope, payload_data.get("correlation"))
                 job = {
                     "media_id": int(item["id"]),
                     "event_id": int(event_id) if event_id else None,
@@ -1267,6 +1357,10 @@ def dispatch_anomaly_detected(conn: sqlite3.Connection, anomaly_ids: Iterable[in
             if row is None:
                 continue
             data = anomaly_event_data(row)
+            # Correlation canonica do core: apenas propagada (sem recalculo).
+            data = enrich_payload_with_correlation(
+                conn, data, table="anomaly_events", anomaly_id=int(anomaly_id), anomaly=dict(row)
+            )
             dispatch_media_event("anomaly_detected", data, event_id=int(anomaly_id), severity=data.get("severity"))
             result["sent"] += 1
         except Exception as exc:
@@ -1285,6 +1379,10 @@ def dispatch_security_anomaly_detected(conn: sqlite3.Connection, anomaly_ids: It
             if row is None:
                 continue
             data = anomaly_event_data(row)
+            # Correlation canonica do core: apenas propagada (sem recalculo).
+            data = enrich_payload_with_correlation(
+                conn, data, table="security_anomalies", anomaly_id=int(anomaly_id), anomaly=dict(row)
+            )
             dispatch_media_event("anomaly_detected", data, event_id=int(anomaly_id), severity=data.get("severity"))
             result["sent"] += 1
         except Exception as exc:
@@ -1328,6 +1426,7 @@ def test_media_integration(integration: Any, *, sample_data: dict[str, Any] | No
             DEFAULT_PAYLOAD_TEMPLATE, sample, event_type="anomaly_detected", is_test=True
         )
     envelope = inject_cgnat_block(envelope, cgnat_block)
+    envelope = inject_correlation_block(envelope, sample.get("correlation"))
     return post_json(url, envelope, integration_headers(item), normalize_timeout(item.get("timeout_seconds")))
 
 
@@ -1386,7 +1485,8 @@ def send_test_event(data: dict[str, Any]) -> dict[str, Any]:
             envelope = render_payload_from_template(
                 DEFAULT_PAYLOAD_TEMPLATE, payload_data, event_type="anomaly_detected", is_test=True
             )
-        return inject_cgnat_block(envelope, cgnat_block)
+        envelope = inject_cgnat_block(envelope, cgnat_block)
+        return inject_correlation_block(envelope, payload_data.get("correlation"))
 
     try:
         conn = connect()
